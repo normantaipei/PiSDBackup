@@ -193,15 +193,37 @@ class RPiProductInterface:
 
 
     def draw_network_card(self):
-        """Draws the network info card"""
+        """Draws the network info card and the QR code next to it."""
         y_start = self.layout['header_height'] + self.layout['card_margin']
-        card_height = self.layout['card_padding'] * 2 + \
-                      self.font_medium.get_height() + \
-                      self.layout['line_spacing_medium'] + \
-                      self.font_small.get_height() * 3 + \
-                      self.layout['line_spacing_small'] * 2
-        card_rect = pygame.Rect(self.layout['card_margin'], y_start,
-                               self.width - 2 * self.layout['card_margin'], card_height)
+
+        # Calculate the required height for the text content
+        text_content_height = self.font_medium.get_height() + \
+                              self.layout['line_spacing_medium'] + \
+                              self.font_small.get_height() * 3 + \
+                              self.layout['line_spacing_small'] * 2
+        card_height = self.layout['card_padding'] * 2 + text_content_height
+
+        # Determine QR code size based on card height, leaving some padding
+        qrcode_target_size = card_height - (self.layout['card_padding'] * 2)
+
+        # Adjust card width to accommodate both text and QR code
+        # We need to consider space for the QR code and additional margin
+        # Approximately leaving 1/3 of the width for the QR code and its internal padding
+        text_card_width = int((self.width - 2 * self.layout['card_margin']) * 0.6) # Allocate ~60% for text
+        
+        # Calculate the total width of the card, including space for QR code if it exists
+        # This will be the full width available for the network card area
+        total_card_width = self.width - 2 * self.layout['card_margin']
+
+        # Determine the width of the main text area of the network card
+        # This ensures the text part of the card doesn't overlap with the QR code.
+        # We'll subtract the QR code's potential width and some extra space.
+        qrcode_area_width = int(qrcode_target_size * 1.1) if self.qrcode_surface else 0 # Add a small buffer
+        
+        # The width of the rectangle for network info text
+        network_text_rect_width = total_card_width - qrcode_area_width - (self.layout['card_padding'] * 2)
+
+        card_rect = pygame.Rect(self.layout['card_margin'], y_start, total_card_width, card_height)
         pygame.draw.rect(self.screen, self.colors['card'], card_rect, border_radius=10)
 
         x = card_rect.x + self.layout['card_padding']
@@ -227,6 +249,21 @@ class RPiProductInterface:
         status_text = self.font_small.render(f"Status: {self.data_collector.data['connection_status']}", True, status_color)
         self.screen.blit(status_text, (x, y))
 
+        # Draw QR Code if available, to the right of the network info
+        if self.qrcode_surface:
+            scaled_qrcode = pygame.transform.scale(self.qrcode_surface, (int(qrcode_target_size), int(qrcode_target_size)))
+            # Position QR code to the right of the text content, centered vertically within the card
+            qrcode_x = card_rect.x + card_rect.width - self.layout['card_padding'] - scaled_qrcode.get_width()
+            qrcode_y = card_rect.y + (card_rect.height - scaled_qrcode.get_height()) // 2
+            self.screen.blit(scaled_qrcode, (qrcode_x, qrcode_y))
+        else:
+            # If no IP for QR, display a small message in the QR code's area
+            no_ip_text = self.font_tiny.render("No IP for QR", True, self.colors['text_dim'])
+            # Center the "No IP for QR" text within the potential QR code area
+            no_ip_x = card_rect.x + card_rect.width - self.layout['card_padding'] - (qrcode_target_size // 2) - (no_ip_text.get_width() // 2)
+            no_ip_y = card_rect.y + (card_rect.height - no_ip_text.get_height()) // 2
+            self.screen.blit(no_ip_text, (no_ip_x, no_ip_y))
+
     def draw_system_card(self):
         """Draws the system info card (temperature and battery only)"""
         # Position below the network card
@@ -235,7 +272,7 @@ class RPiProductInterface:
                               self.font_medium.get_height() + \
                               self.layout['line_spacing_medium'] + \
                               self.font_small.get_height() * 3 + \
-                              self.layout['line_spacing_small'] * 2)
+                              self.layout['line_spacing_small'] * 2) # Height of the text content area
 
         y_start = network_card_bottom + self.layout['card_margin']
 
@@ -285,7 +322,7 @@ class RPiProductInterface:
                               self.font_medium.get_height() + \
                               self.layout['line_spacing_medium'] + \
                               self.font_small.get_height() * 3 + \
-                              self.layout['line_spacing_small'] * 2)
+                              self.layout['line_spacing_small'] * 2) # Height of the text content area
 
         y_start = network_card_bottom + self.layout['card_margin']
 
@@ -370,20 +407,6 @@ class RPiProductInterface:
         pygame.draw.circle(self.screen, status_color, (self.width - self.layout['card_margin'] - int(status_bar_height * 0.35),
                                                         y_start + status_bar_height // 2),
                                                        int(status_bar_height * 0.2))
-
-        # Draw QR Code if available
-        if self.qrcode_surface:
-            qrcode_size = status_bar_height * 0.8
-            scaled_qrcode = pygame.transform.scale(self.qrcode_surface, (int(qrcode_size), int(qrcode_size)))
-            qrcode_x = self.width - self.layout['card_margin'] - int(qrcode_size)
-            qrcode_y = y_start + (status_bar_height - qrcode_size) // 2
-            self.screen.blit(scaled_qrcode, (qrcode_x, qrcode_y))
-        else:
-            no_ip_text = self.font_tiny.render("No IP for QR", True, self.colors['text_dim'])
-            no_ip_rect = no_ip_text.get_rect(center=(self.width - self.layout['card_margin'] - int(status_bar_height * 0.5),
-                                                      y_start + status_bar_height // 2))
-            self.screen.blit(no_ip_text, no_ip_rect)
-
 
     def handle_touch(self, pos):
         """Handles touch events"""
