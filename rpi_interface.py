@@ -17,7 +17,6 @@ class RPiProductInterface:
         self.running = True
         self.data_collector = DataCollector()
         
-        # Initialize SDCopyManager
         self.sd_copy_manager = SDCopyManager()
         self.sd_copy_manager.set_event_callback(self.update_copy_status)
         self.copy_status_data = {'status_message': 'Initializing...', 'ssd_present': False}
@@ -27,7 +26,6 @@ class RPiProductInterface:
         self.setup_ui()
         self.setup_data_updates()
         
-        # Start the SD card detection loop in a separate thread
         self.sd_detection_thread = threading.Thread(target=self.sd_copy_manager.main_loop, daemon=True)
         self.sd_detection_thread.start()
         print("SD card detection thread started.")
@@ -95,7 +93,6 @@ class RPiProductInterface:
             'line_spacing_medium': int(self.height * 0.07),
         }
 
-        # touch_areas now correctly defined without border_radius
         self.touch_areas = {
             'restart': pygame.Rect(self.width - int(self.width * 0.12) - self.layout['card_margin'],
                                    self.layout['card_margin'] * 0.5,
@@ -105,8 +102,7 @@ class RPiProductInterface:
                                    self.layout['card_margin'] * 0.5,
                                    int(self.width * 0.12),
                                    int(self.layout['header_height'] * 0.8)),
-            # This 'copy_stop' will be re-assigned dynamically in draw_progress_bar_card
-            'copy_stop': pygame.Rect(0, 0, 0, 0) # Initialize as an empty rect
+            'copy_stop': pygame.Rect(0, 0, 0, 0)
         }
 
     def generate_qrcode(self):
@@ -216,9 +212,9 @@ class RPiProductInterface:
                                    self.font_small.get_height() * 3 + \
                                    self.layout['line_spacing_small'] * 2
         
-        card_height = (self.layout['card_padding'] * 2 + text_content_base_height) * 0.7 # 縮小 0.7 倍
+        card_height = (self.layout['card_padding'] * 2 + text_content_base_height) * 0.7
 
-        qrcode_target_size = (card_height - (self.layout['card_padding'] * 2)) * 0.8 # QR Code 縮小 0.8 倍
+        qrcode_target_size = (card_height - (self.layout['card_padding'] * 2)) * 0.8
         
         total_card_width = self.width - 2 * self.layout['card_margin']
         
@@ -255,20 +251,18 @@ class RPiProductInterface:
             no_ip_y = card_rect.y + (card_rect.height - no_ip_text.get_height()) // 2
             self.screen.blit(no_ip_text, (no_ip_x, no_ip_y))
         
-        return card_rect.bottom # Return the bottom Y coordinate of this card
+        return card_rect.bottom
 
-    # draw_usb_card now accepts y_start as a parameter
     def draw_usb_card(self, y_start):
         """Draws the USB device card at a given y_start position. Returns its bottom Y coordinate."""
-        # Estimate for progress bar section (simplified to a fixed height for consistency)
         status_bar_height = int(self.height * 0.08)
-        progress_bar_height_estimate = self.font_small.get_height() * 3 + self.layout['card_padding'] * 2 + self.layout['line_spacing_small'] * 2
         
-        # Max height for USB card, before the estimated progress bar area and status bar
+        # We need to use the scaled height of the progress bar for calculation here
+        progress_bar_height_estimate = (self.font_small.get_height() * 3 + self.layout['card_padding'] * 2 + self.layout['line_spacing_small'] * 2) * 0.7 # Scaled by 0.7
+        
         max_usb_card_height = self.height - y_start - self.layout['card_margin'] - progress_bar_height_estimate - status_bar_height
 
-        # Ensure a minimum height for the USB card even if no devices, so it's always visible
-        min_usb_card_height = self.font_small.get_height() * 2 + self.layout['card_padding'] * 2 + self.layout['line_spacing_small'] # Title + "No USB Devices"
+        min_usb_card_height = self.font_small.get_height() * 2 + self.layout['card_padding'] * 2 + self.layout['line_spacing_small']
         card_rect = pygame.Rect(self.layout['card_margin'], y_start,
                                self.width - 2 * self.layout['card_margin'], max(min_usb_card_height, max_usb_card_height))
 
@@ -300,7 +294,7 @@ class RPiProductInterface:
             no_usb_text = self.font_small.render("No USB Devices", True, self.colors['text_dim'])
             self.screen.blit(no_usb_text, (x, y))
 
-        return card_rect.bottom # Return the bottom Y coordinate of this card
+        return card_rect.bottom
 
     # Helper function to calculate network card's bottom Y without drawing it again
     def _calculate_network_card_bottom_y(self):
@@ -315,13 +309,14 @@ class RPiProductInterface:
     # Helper function to calculate USB card's bottom Y without drawing it
     def _calculate_usb_card_bottom_y(self, y_start_for_calc):
         status_bar_height = int(self.height * 0.08)
-        progress_bar_height_estimate = self.font_small.get_height() * 3 + self.layout['card_padding'] * 2 + self.layout['line_spacing_small'] * 2
+        # Use the scaled height for progress bar estimate
+        progress_bar_height_estimate = (self.font_small.get_height() * 3 + self.layout['card_padding'] * 2 + self.layout['line_spacing_small'] * 2) * 0.7
+        
         max_usb_card_height = self.height - y_start_for_calc - self.layout['card_margin'] - progress_bar_height_estimate - status_bar_height
         min_usb_card_height = self.font_small.get_height() * 2 + self.layout['card_padding'] * 2 + self.layout['line_spacing_small']
         
         usb_content_height_ideal = 0
         if self.data_collector.data['usb_devices']:
-            # This loop only for calculation, not actual drawing
             for device in self.data_collector.data['usb_devices']:
                 usb_content_height_ideal += self.font_small.get_height() * 2 + self.layout['line_spacing_small']
         else:
@@ -335,12 +330,15 @@ class RPiProductInterface:
 
 
     def draw_progress_bar_card(self, y_start):
-        """Draws the SD card copy progress bar card."""
-        fixed_progress_card_height = self.font_small.get_height() * 3 + self.layout['card_padding'] * 2 + self.layout['line_spacing_small'] * 2
+        """Draws the SD card copy progress bar card at a given y_start position."""
+        # Fixed height for progress card when SSD is present (now scaled)
+        fixed_progress_card_height_scaled = (self.font_small.get_height() * 3 + self.layout['card_padding'] * 2 + self.layout['line_spacing_small'] * 2) * 0.7
         
         ssd_present = self.copy_status_data.get('ssd_present', False)
-        card_height = fixed_progress_card_height
+        card_height = fixed_progress_card_height_scaled
         if not ssd_present:
+            # If SSD is not present, use a larger height for the "Please Insert SSD" message
+            # This height is not scaled, as it needs to fit the text clearly
             card_height = self.font_medium.get_height() + self.layout['card_padding'] * 2 + self.layout['line_spacing_medium'] * 2 
 
         card_rect = pygame.Rect(self.layout['card_margin'], y_start,
@@ -393,7 +391,6 @@ class RPiProductInterface:
             stop_button_x = card_rect.x + card_rect.width - stop_button_width - self.layout['card_padding']
             stop_button_y = card_rect.y + card_rect.height - stop_button_height - self.layout['card_padding']
             
-            # Re-assign touch area rect for the stop button
             self.touch_areas['copy_stop'] = pygame.Rect(stop_button_x, stop_button_y, stop_button_width, stop_button_height)
 
             pygame.draw.rect(self.screen, self.colors['error'], self.touch_areas['copy_stop'], border_radius=5)
