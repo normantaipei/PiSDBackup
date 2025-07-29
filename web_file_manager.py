@@ -42,15 +42,15 @@ HTML_TEMPLATE = '''
         .breadcrumb .separator { margin: 0 8px; color: #bdc1c6; }
 
         /* New styles for grouping */
-        .month-group { margin-bottom: 40px; }
-        .month-title { font-size: 24px; font-weight: 500; color: #202124; margin-bottom: 20px; padding-top: 20px; }
-        .day-group { margin-bottom: 20px; }
-        .day-title { font-size: 18px; font-weight: 500; color: #5f6368; margin-bottom: 10px; }
+        .month-group { margin-bottom: 30px; } /* Reduced margin */
+        .month-title { font-size: 24px; font-weight: 500; color: #202124; margin-bottom: 15px; padding-top: 20px; } /* Reduced margin */
+        .day-group { margin-bottom: 15px; } /* Reduced margin */
+        .day-title { font-size: 18px; font-weight: 500; color: #5f6368; margin-bottom: 8px; } /* Reduced margin */
 
         .file-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-            gap: 16px;
+            gap: 8px; /* Reduced gap */
         }
         .file-item {
             background: #fff;
@@ -62,6 +62,7 @@ HTML_TEMPLATE = '''
             cursor: pointer;
             transition: box-shadow 0.2s, transform 0.2s;
             position: relative;
+            height: 140px; /* Set a fixed height for the thumbnail container */
         }
         .file-item:hover {
             box-shadow: 0 4px 8px rgba(0,0,0,0.1);
@@ -69,7 +70,7 @@ HTML_TEMPLATE = '''
         }
         .file-thumbnail {
             width: 100%;
-            height: 140px;
+            height: 100%; /* Fill the entire file-item height */
             background: #e8eaed;
             display: flex;
             align-items: center;
@@ -81,7 +82,7 @@ HTML_TEMPLATE = '''
         .file-thumbnail img {
             max-width: 100%;
             max-height: 100%;
-            object-fit: contain;
+            object-fit: cover; /* Use cover to fill the thumbnail area while maintaining aspect ratio */
             display: block;
             margin: auto;
         }
@@ -90,28 +91,7 @@ HTML_TEMPLATE = '''
             color: #5f6368;
         }
         .file-info-bottom {
-            padding: 12px;
-            text-align: left;
-            flex-grow: 1;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-        }
-        .file-name {
-            font-weight: 500;
-            font-size: 15px;
-            color: #202124;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            margin-bottom: 4px;
-        }
-        .file-meta {
-            font-size: 12px;
-            color: #5f6368;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            display: none; /* Hide file information */
         }
         .file-actions-overlay {
             position: absolute;
@@ -297,24 +277,14 @@ HTML_TEMPLATE = '''
                         // 對於圖片，直接使用縮圖
                         iconHtml = `<img src="/api/thumbnail?path=${encodeURIComponent(file.path)}" alt="${file.name}" onerror="this.onerror=null; this.src=''; this.style.display='none'; this.closest('.file-thumbnail').innerHTML='<span class=\\"material-icons file-icon-placeholder\\">image_not_supported</span>';">`;
                         
-
                         html += `
                             <div class="file-item">
                                 <div class="file-thumbnail" onclick="previewImage('${file.path}')">
                                     ${iconHtml}
-                                        </div>
-                                <div class="file-info-bottom">
-                                    <div class="file-name" title="${file.name}">${file.name}</div>
-                                    <div class="file-meta">
-                                        ${file.size}
-                                        ${file.modified ? `<br>${file.modified.split(' ')[1].substring(0, 5)}` : ''}
-                                    </div>
                                 </div>
                                 <div class="file-actions-overlay">
                                     <button class="btn btn-primary" onclick="downloadFile('${file.path}')"><span class="material-icons">download</span>下載</button>
                                     <button class="btn btn-secondary" onclick="previewImage('${file.path}')"><span class="material-icons">visibility</span>預覽</button>
-                                    <button class="btn btn-secondary" onclick="renameFile('${file.path}', '${file.name}')"><span class="material-icons">edit</span>重新命名</button>
-                                    <button class="btn btn-danger" onclick="deleteFile('${file.path}', '${file.name}')"><span class="material-icons">delete</span>刪除</button>
                                 </div>
                             </div>
                         `;
@@ -361,65 +331,23 @@ HTML_TEMPLATE = '''
             }
         }
 
-        // Rename file/folder
+        // Rename file/folder - 這些函數現在沒有被調用，但仍然存在
+        let renameTarget = ''; // 為了避免錯誤，保持這個變數的宣告
         function renameFile(filePath, currentName) {
-            renameTarget = filePath;
-            document.getElementById('newFileName').value = currentName;
-            document.getElementById('renameModal').style.display = 'flex'; // Use flex to center
+            // 此功能已被移除，這裡可以放一個提示或不做任何事
+            alert('此功能已被禁用。');
         }
 
-        // Confirm rename
+        // Confirm rename - 這些函數現在沒有被調用，但仍然存在
         async function confirmRename() {
-            const newName = document.getElementById('newFileName').value.trim();
-            if (!newName) {
-                alert('新名稱不能為空。');
-                return;
-            }
-            
-            try {
-                const response = await fetch('/api/rename', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        oldPath: renameTarget,
-                        newName: newName
-                    })
-                });
-                
-                const result = await response.json();
-                if (result.success) {
-                    closeModal('renameModal');
-                    loadFiles();
-                } else {
-                    alert('重新命名失敗: ' + result.error);
-                }
-            } catch (error) {
-                alert('重新命名時發生錯誤。');
-            }
+            // 此功能已被禁用
+            alert('此功能已被禁用。');
         }
 
-        // Delete file/folder
+        // Delete file/folder - 這些函數現在沒有被調用，但仍然存在
         async function deleteFile(filePath, fileName) {
-            if (!confirm(`您確定要刪除 "${fileName}" 嗎？`)) return;
-            
-            try {
-                const response = await fetch('/api/delete', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        path: filePath
-                    })
-                });
-                
-                const result = await response.json();
-                if (result.success) {
-                    loadFiles();
-                } else {
-                    alert('刪除失敗: ' + result.error);
-                }
-            } catch (error) {
-                alert('刪除時發生錯誤。');
-            }
+            // 此功能已被禁用
+            alert('此功能已被禁用。');
         }
 
         // Upload file
@@ -661,68 +589,16 @@ def api_rename():
     old_relative_path_str = data.get('oldPath', '')
     new_name = data.get('newName', '')
 
-    if not all([old_relative_path_str, new_name]):
-        return jsonify({'success': False, 'error': 'Missing parameters'})
-
-    base_dir_path = Path(BASE_DIRECTORY).resolve()
-    old_full_path = (base_dir_path / unquote(old_relative_path_str)).resolve()
-
-    # Security check: ensure the file is within the base directory
-    try:
-        old_full_path.relative_to(base_dir_path)
-    except ValueError:
-        return jsonify({'success': False, 'error': 'Access denied: Path outside allowed directory'}), 403
-
-    # Construct new full path
-    # Use old_full_path.parent to ensure the new file is in the same directory
-    new_full_path = (old_full_path.parent / new_name).resolve()
-
-    # Security check: ensure the new path is also within the base directory
-    try:
-        new_full_path.relative_to(base_dir_path)
-    except ValueError:
-        return jsonify({'success': False, 'error': 'Access denied: New path outside allowed directory'}), 403
-
-    if not old_full_path.exists():
-        return jsonify({'success': False, 'error': 'Original file/folder not found'})
-
-    if new_full_path.exists():
-        return jsonify({'success': False, 'error': 'Target file/folder already exists'})
-
-    try:
-        os.rename(str(old_full_path), str(new_full_path))
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    # 由於前端已移除相關按鈕，這裡為了安全性仍然保留檢查，但會直接返回禁用錯誤
+    return jsonify({'success': False, 'error': '此功能已被禁用。'}), 403 
 
 @app.route('/api/delete', methods=['POST'])
 def api_delete():
     data = request.json
     relative_path_str = data.get('path', '')
 
-    if not relative_path_str:
-        return jsonify({'success': False, 'error': 'Missing parameters'})
-
-    base_dir_path = Path(BASE_DIRECTORY).resolve()
-    full_path = (base_dir_path / unquote(relative_path_str)).resolve()
-
-    # Security check: ensure the file is within the base directory
-    try:
-        full_path.relative_to(base_dir_path)
-    except ValueError:
-        return jsonify({'success': False, 'error': 'Access denied: Path outside allowed directory'}), 403
-
-    if not full_path.exists():
-        return jsonify({'success': False, 'error': 'File/folder not found'})
-
-    try:
-        if full_path.is_dir():
-            shutil.rmtree(str(full_path))
-        else:
-            os.remove(str(full_path))
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    # 由於前端已移除相關按鈕，這裡為了安全性仍然保留檢查，但會直接返回禁用錯誤
+    return jsonify({'success': False, 'error': '此功能已被禁用。'}), 403
 
 @app.route('/api/upload', methods=['POST'])
 def api_upload():
