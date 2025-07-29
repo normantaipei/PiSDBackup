@@ -86,9 +86,9 @@ HTML_TEMPLATE = '''
             display: block;
             margin: auto;
         }
-        .file-thumbnail .folder-icon, .file-thumbnail .file-icon-placeholder {
-            font-size: 60px;
-            color: #5f6368;
+        /* 隱藏 image_not_supported 圖示，只在 thumbnail 失敗時應用 */
+        .file-thumbnail .file-icon-placeholder {
+            display: none; /* 預設不顯示 */
         }
         .file-info-bottom {
             display: none; /* Hide file information */
@@ -275,7 +275,8 @@ HTML_TEMPLATE = '''
                         let iconHtml = '';
 
                         // 對於圖片，直接使用縮圖
-                        iconHtml = `<img src="/api/thumbnail?path=${encodeURIComponent(file.path)}" alt="${file.name}" onerror="this.onerror=null; this.src=''; this.style.display='none'; this.closest('.file-thumbnail').innerHTML='<span class=\\"material-icons file-icon-placeholder\\">image_not_supported</span>';">`;
+                        // 改變了 onerror 行為，使其只隱藏圖片本身，不顯示替代圖示
+                        iconHtml = `<img src="/api/thumbnail?path=${encodeURIComponent(file.path)}" alt="${file.name}" onerror="this.onerror=null; this.style.display='none';">`;
                         
                         html += `
                             <div class="file-item">
