@@ -18,7 +18,12 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 # Ensure this path is valid before deployment.
 BASE_DIRECTORY = "/media/norman/新增磁碟區"
 
-# HTML Template
+# Define common RAW file extensions.
+# We will check both lowercase and uppercase versions dynamically.
+RAW_EXTENSIONS = ['.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.rw2', '.raf', '.pef', '.srw', '.kdc', '.mos', '.3fr', '.erf', '.mef', '.nrw', '.qtk', '.x3f']
+
+
+# HTML Template (此部分沒有變動)
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -221,8 +226,21 @@ HTML_TEMPLATE = '''
         </div>
     </div>
 
+    <div id="rawDownloadModal" class="modal">
+        <div class="modal-content">
+            <h3>Download Option</h3>
+            <p>This image has a RAW version available. Which version would you like to download?</p>
+            <div class="form-actions" style="margin-top: 20px; display: flex; justify-content: space-around;">
+                <button class="btn btn-secondary" onclick="closeModal('rawDownloadModal')">Cancel</button>
+                <button class="btn btn-primary" id="downloadJpgBtn"><span class="material-icons">download</span>Download JPG</button>
+                <button class="btn btn-primary" id="downloadRawBtn"><span class="material-icons">download</span>Download RAW</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let currentPath = ''; // currentPath will be relative to BASE_DIRECTORY
+        let currentDownloadFilePath = ''; // To store the path for download choice
 
         // Load file list
         async function loadFiles() {
@@ -268,13 +286,14 @@ HTML_TEMPLATE = '''
 
                         iconHtml = `<img src="/api/thumbnail?path=${encodeURIComponent(file.path)}" alt="${file.name}" onerror="this.onerror=null; this.style.display='none';">`;
                         
+                        // Modified download button to call handleDownloadClick
                         html += `
                             <div class="file-item">
                                 <div class="file-thumbnail" onclick="previewImage('${file.path}')">
                                     ${iconHtml}
                                 </div>
                                 <div class="file-actions-overlay">
-                                    <button class="btn btn-primary" onclick="downloadFile('${file.path}')"><span class="material-icons">download</span>Download</button>
+                                    <button class="btn btn-primary" onclick="handleDownloadClick('${file.path}')"><span class="material-icons">download</span>Download</button>
                                     <button class="btn btn-secondary" onclick="previewImage('${file.path}')"><span class="material-icons">visibility</span>Preview</button>
                                 </div>
                             </div>
@@ -298,7 +317,37 @@ HTML_TEMPLATE = '''
             loadFiles();
         }
 
-        // Download file
+        // New function to handle download click and check for RAW
+        async function handleDownloadClick(filePath) {
+            currentDownloadFilePath = filePath;
+            try {
+                const response = await fetch(`/api/check_raw?path=${encodeURIComponent(filePath)}`);
+                const data = await response.json();
+
+                if (data.raw_path) {
+                    // If RAW version exists, show the choice modal
+                    document.getElementById('rawDownloadModal').style.display = 'flex';
+                    // Set up event listeners for the download buttons in the modal
+                    document.getElementById('downloadJpgBtn').onclick = () => {
+                        downloadFile(filePath); // Download JPG version
+                        closeModal('rawDownloadModal');
+                    };
+                    document.getElementById('downloadRawBtn').onclick = () => {
+                        downloadFile(data.raw_path); // Download RAW version
+                        closeModal('rawDownloadModal');
+                    };
+                } else {
+                    // No RAW version, directly download JPG
+                    downloadFile(filePath);
+                }
+            } catch (error) {
+                console.error("Error checking for RAW file:", error);
+                // If there's an error, just default to downloading the original file
+                downloadFile(filePath);
+            }
+        }
+
+        // Download file - now takes an optional type parameter for RAW download
         function downloadFile(filePath) {
             const url = `/api/download?path=${encodeURIComponent(filePath)}`;
             window.open(url, '_blank');
@@ -375,11 +424,16 @@ HTML_TEMPLATE = '''
         window.onclick = function(event) {
             const renameModal = document.getElementById('renameModal');
             const imageModal = document.getElementById('imageModal');
+            const rawDownloadModal = document.getElementById('rawDownloadModal'); // New modal
+            
             if (event.target === renameModal) {
                 closeModal('renameModal');
             }
             if (event.target === imageModal) {
                 closeModal('imageModal');
+            }
+            if (event.target === rawDownloadModal) { // New modal
+                closeModal('rawDownloadModal');
             }
         }
 
@@ -461,10 +515,12 @@ def api_files():
             except ValueError:
                 continue
 
-            file_info = get_file_info(str(full_item_path), str(base_dir_path))
-            
-            if file_info and file_info['type'] == 'image':
-                files_info.append(file_info)
+            # Only process JPG/JPEG for display in the grid
+            if file_name.lower().endswith(('.jpg', '.jpeg')):
+                file_info = get_file_info(str(full_item_path), str(base_dir_path))
+                
+                if file_info and file_info['type'] == 'image':
+                    files_info.append(file_info)
 
     files_info.sort(key=lambda x: datetime.strptime(x['modified'], '%Y-%m-%d %H:%M:%S'), reverse=True)
 
@@ -498,6 +554,52 @@ def api_files():
         ordered_grouped_files.append(month_data)
 
     return jsonify({'grouped_files': ordered_grouped_files})
+
+@app.route('/api/check_raw')
+def api_check_raw():
+    """
+    Checks if a given image file (JPG/JPEG) has a corresponding RAW file in the same directory.
+    Returns the path of the RAW file if found, otherwise None.
+    Handles both lowercase and uppercase RAW extensions.
+    """
+    relative_path_str = request.args.get('path', '')
+
+    if not relative_path_str:
+        return jsonify({'error': 'Missing parameters'}), 400
+
+    base_dir_path = Path(BASE_DIRECTORY).resolve()
+    full_jpg_path = (base_dir_path / unquote(relative_path_str)).resolve()
+
+    try:
+        # Crucial security check: Ensure the resolved path is within the base directory
+        full_jpg_path.relative_to(base_dir_path)
+    except ValueError:
+        return jsonify({'error': 'Access denied: Path outside allowed directory'}), 403
+
+    # Ensure it's a file and a JPG/JPEG
+    if not full_jpg_path.is_file() or not full_jpg_path.suffix.lower() in ('.jpg', '.jpeg'):
+        return jsonify({'raw_path': None}) 
+
+    # Get the base name (stem) of the JPG file and its parent directory
+    stem = full_jpg_path.stem 
+    parent_dir = full_jpg_path.parent 
+
+    # Iterate through all potential RAW extensions to find a matching file
+    for raw_ext in RAW_EXTENSIONS:
+        # Check for lowercase version
+        potential_raw_path_lower = parent_dir / (stem + raw_ext)
+        if potential_raw_path_lower.is_file():
+            relative_raw_path = potential_raw_path_lower.relative_to(base_dir_path).as_posix()
+            return jsonify({'raw_path': relative_raw_path})
+        
+        # Check for uppercase version
+        potential_raw_path_upper = parent_dir / (stem + raw_ext.upper())
+        if potential_raw_path_upper.is_file():
+            relative_raw_path = potential_raw_path_upper.relative_to(base_dir_path).as_posix()
+            return jsonify({'raw_path': relative_raw_path})
+            
+    # If no RAW file is found after checking all extensions (both cases)
+    return jsonify({'raw_path': None})
 
 @app.route('/api/thumbnail')
 def api_thumbnail():
