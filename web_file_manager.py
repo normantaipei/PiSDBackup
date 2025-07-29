@@ -1,5 +1,3 @@
-# web_file_manager.py
-
 import os
 import json
 import shutil
@@ -36,18 +34,23 @@ HTML_TEMPLATE = '''
         .header h1 { font-size: 22px; font-weight: 400; display: flex; align-items: center; }
         .header h1 .material-icons { margin-right: 8px; font-size: 28px; color: #4285f4; }
         .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
-        .file-manager { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24); }
-        .toolbar { padding: 16px 24px; border-bottom: 1px solid #dadce0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        .file-manager { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24); padding: 20px; } /* Adjusted padding */
+        .toolbar { display: none; } /* Hide toolbar as breadcrumb is removed */
         .breadcrumb { font-size: 14px; color: #5f6368; display: flex; align-items: center; flex-wrap: wrap; }
         .breadcrumb a { color: #1a73e8; text-decoration: none; padding: 4px 0; }
         .breadcrumb a:hover { text-decoration: underline; }
         .breadcrumb .separator { margin: 0 8px; color: #bdc1c6; }
 
+        /* New styles for grouping */
+        .month-group { margin-bottom: 40px; }
+        .month-title { font-size: 24px; font-weight: 500; color: #202124; margin-bottom: 20px; padding-top: 20px; }
+        .day-group { margin-bottom: 20px; }
+        .day-title { font-size: 18px; font-weight: 500; color: #5f6368; margin-bottom: 10px; }
+
         .file-grid {
-            padding: 20px;
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); /* Adjusted for more items per row */
-            gap: 16px; /* Spacing between items */
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 16px;
         }
         .file-item {
             background: #fff;
@@ -66,7 +69,7 @@ HTML_TEMPLATE = '''
         }
         .file-thumbnail {
             width: 100%;
-            height: 140px; /* Fixed height for thumbnails */
+            height: 140px;
             background: #e8eaed;
             display: flex;
             align-items: center;
@@ -78,7 +81,7 @@ HTML_TEMPLATE = '''
         .file-thumbnail img {
             max-width: 100%;
             max-height: 100%;
-            object-fit: contain; /* Use contain to show full image, even if it leaves empty space */
+            object-fit: contain;
             display: block;
             margin: auto;
         }
@@ -207,33 +210,30 @@ HTML_TEMPLATE = '''
     <div class="header">
         <h1><span class="material-icons">photo_library</span>Google Photos Style File Manager</h1>
         <div>
-            <button class="btn btn-secondary" onclick="refreshFiles()"><span class="material-icons">refresh</span>Refresh</button>
+            <button class="btn btn-secondary" onclick="refreshFiles()"><span class="material-icons">refresh</span>重新整理</button>
             <input type="file" id="uploadFile" class="upload-input" onchange="uploadFile()" multiple>
-            <button class="btn btn-primary" onclick="document.getElementById('uploadFile').click()"><span class="material-icons">cloud_upload</span>Upload File</button>
+            <button class="btn btn-primary" onclick="document.getElementById('uploadFile').click()"><span class="material-icons">cloud_upload</span>上傳檔案</button>
         </div>
     </div>
 
     <div class="container">
         <div class="file-manager" id="fileManager">
-            <div class="toolbar">
-                <div class="breadcrumb" id="breadcrumb"></div>
-            </div>
-            <div class="file-grid" id="fileList">
-                <div class="no-content">Loading files...</div>
+            <div id="fileList">
+                <div class="no-content">載入檔案中...</div>
             </div>
         </div>
     </div>
 
     <div id="renameModal" class="modal">
         <div class="modal-content">
-            <h3>Rename</h3>
+            <h3>重新命名</h3>
             <div class="form-group">
-                <label for="newFileName">New Name:</label>
+                <label for="newFileName">新名稱:</label>
                 <input type="text" id="newFileName" />
             </div>
             <div class="form-actions">
-                <button class="btn btn-secondary" onclick="closeModal('renameModal')">Cancel</button>
-                <button class="btn btn-primary" onclick="confirmRename()">Confirm</button>
+                <button class="btn btn-secondary" onclick="closeModal('renameModal')">取消</button>
+                <button class="btn btn-primary" onclick="confirmRename()">確認</button>
             </div>
         </div>
     </div>
@@ -247,108 +247,92 @@ HTML_TEMPLATE = '''
 
     <script>
         let currentPath = ''; // currentPath will be relative to BASE_DIRECTORY
-        let renameTarget = ''; // Stores the full path of the item to be renamed
 
         // Load file list
         async function loadFiles() {
             try {
-                const response = await fetch(`/api/files?path=${encodeURIComponent(currentPath)}`);
+                // 不再傳遞 path 參數，因為後端會遞迴掃描整個 BASE_DIRECTORY
+                const response = await fetch(`/api/files`); 
                 const data = await response.json();
                 
                 if (data.error) {
-                    document.getElementById('fileList').innerHTML = `<div class="no-content">Error: ${data.error}</div>`;
+                    document.getElementById('fileList').innerHTML = `<div class="no-content">錯誤: ${data.error}</div>`;
                     return;
                 }
-                updateBreadcrumb();
-                displayFiles(data.files);
+                // updateBreadcrumb(); // 麵包屑導航已移除
+                displayFiles(data.grouped_files);
             } catch (error) {
-                document.getElementById('fileList').innerHTML = '<div class="no-content">Error loading files.</div>';
+                document.getElementById('fileList').innerHTML = '<div class="no-content">載入檔案時發生錯誤。</div>';
                 console.error("Error loading files:", error);
             }
         }
 
-        // Update breadcrumb navigation
-        function updateBreadcrumb() {
-            const breadcrumb = document.getElementById('breadcrumb');
-            let html = `<a href="#" onclick="navigateTo('')">🏠 Root</a>`;
-            
-            if (currentPath) {
-                const parts = currentPath.split('/').filter(p => p);
-                let buildPath = '';
-                parts.forEach(part => {
-                    buildPath += '/' + part;
-                    html += `<span class="separator">/</span> <a href="#" onclick="navigateTo('${buildPath}')">${part}</a>`;
-                });
-            }
-            breadcrumb.innerHTML = html;
-        }
+        // updateBreadcrumb 函數已移除
 
         // Display file list in a Google Photos-like grid
-        function displayFiles(files) {
-            const fileList = document.getElementById('fileList');
+        function displayFiles(data) {
+            const fileListContainer = document.getElementById('fileList');
             let html = '';
-            
-            files.forEach(file => {
-                const isImage = file.type === 'image';
-                const fileExtension = file.name.split('.').pop().toLowerCase();
-                let iconHtml = '';
 
-                if (file.is_directory) {
-                    iconHtml = `<span class="material-icons folder-icon">folder</span>`;
-                } else if (isImage) {
-                    // Use actual thumbnail for images
-                    iconHtml = `<img src="/api/thumbnail?path=${encodeURIComponent(file.path)}" alt="${file.name}" onerror="this.onerror=null; this.src=''; this.style.display='none'; this.closest('.file-thumbnail').innerHTML='<span class=\\"material-icons file-icon-placeholder\\">image_not_supported</span>';">`;
-                } else {
-                    // Generic icons for other file types
-                    const genericFileIcon = {
-                        'pdf': 'picture_as_pdf',
-                        'doc': 'article', 'docx': 'article',
-                        'xls': 'grid_on', 'xlsx': 'grid_on',
-                        'ppt': 'slideshow', 'pptx': 'slideshow',
-                        'zip': 'folder_zip', 'rar': 'folder_zip', '7z': 'folder_zip',
-                        'txt': 'description',
-                        'mp3': 'music_note', 'wav': 'music_note',
-                        'mp4': 'videocam', 'avi': 'videocam',
-                        'json': 'data_object', 'xml': 'data_object', 'html': 'code', 'py': 'code', 'js': 'code', 'css': 'code'
-                    }[fileExtension] || 'insert_drive_file'; // Default icon
-                    iconHtml = `<span class="material-icons file-icon-placeholder">${genericFileIcon}</span>`;
-                }
+            if (!data || data.length === 0) {
+                html = '<div class="no-content">這個資料夾沒有圖片。</div>';
+                fileListContainer.innerHTML = html;
+                return;
+            }
 
-                html += `
-                    <div class="file-item">
-                        <div class="file-thumbnail" onclick="${file.is_directory ? `MapsTo('${file.path}')` : (isImage ? `previewImage('${file.path}')` : `downloadFile('${file.path}')`)}">
-                            ${iconHtml}
-                        </div>
-                        <div class="file-info-bottom">
-                            <div class="file-name" title="${file.name}">${file.name}</div>
-                            <div class="file-meta">
-                                ${file.is_directory ? 'Folder' : `${file.size}`}
-                                ${file.modified ? `<br>${file.modified}` : ''}
+            data.forEach(monthGroup => {
+                html += `<div class="month-group">`;
+                html += `<div class="month-title">${monthGroup.title_month}</div>`;
+
+                monthGroup.days.forEach(dayGroup => {
+                    html += `<div class="day-group">`;
+                    html += `<div class="day-title">${dayGroup.title_day}</div>`;
+                    html += `<div class="file-grid">`; // Start a new grid for each day
+
+                    dayGroup.items.forEach(file => {
+                        // 這裡我們已經假設 file 都是圖片了，因為後端已經篩選過
+                        const fileExtension = file.name.split('.').pop().toLowerCase();
+                        let iconHtml = '';
+
+                        // 對於圖片，直接使用縮圖
+                        iconHtml = `<img src="/api/thumbnail?path=${encodeURIComponent(file.path)}" alt="${file.name}" onerror="this.onerror=null; this.src=''; this.style.display='none'; this.closest('.file-thumbnail').innerHTML='<span class=\\"material-icons file-icon-placeholder\\">image_not_supported</span>';">`;
+                        
+
+                        html += `
+                            <div class="file-item">
+                                <div class="file-thumbnail" onclick="previewImage('${file.path}')">
+                                    ${iconHtml}
+                                        </div>
+                                <div class="file-info-bottom">
+                                    <div class="file-name" title="${file.name}">${file.name}</div>
+                                    <div class="file-meta">
+                                        ${file.size}
+                                        ${file.modified ? `<br>${file.modified.split(' ')[1].substring(0, 5)}` : ''}
+                                    </div>
+                                </div>
+                                <div class="file-actions-overlay">
+                                    <button class="btn btn-primary" onclick="downloadFile('${file.path}')"><span class="material-icons">download</span>下載</button>
+                                    <button class="btn btn-secondary" onclick="previewImage('${file.path}')"><span class="material-icons">visibility</span>預覽</button>
+                                    <button class="btn btn-secondary" onclick="renameFile('${file.path}', '${file.name}')"><span class="material-icons">edit</span>重新命名</button>
+                                    <button class="btn btn-danger" onclick="deleteFile('${file.path}', '${file.name}')"><span class="material-icons">delete</span>刪除</button>
+                                </div>
                             </div>
-                        </div>
-                        <div class="file-actions-overlay">
-                            ${file.is_directory ? 
-                                `<button class="btn btn-primary" onclick="navigateTo('${file.path}')"><span class="material-icons">folder_open</span>Open</button>` :
-                                `<button class="btn btn-primary" onclick="downloadFile('${file.path}')"><span class="material-icons">download</span>Download</button>`}
-                            ${isImage ? `<button class="btn btn-secondary" onclick="previewImage('${file.path}')"><span class="material-icons">visibility</span>Preview</button>` : ''}
-                            <button class="btn btn-secondary" onclick="renameFile('${file.path}', '${file.name}')"><span class="material-icons">edit</span>Rename</button>
-                            <button class="btn btn-danger" onclick="deleteFile('${file.path}', '${file.name}')"><span class="material-icons">delete</span>Delete</button>
-                        </div>
-                    </div>
-                `;
+                        `;
+                    });
+                    html += `</div></div>`; // Close file-grid and day-group
+                });
+                html += `</div>`; // Close month-group
             });
             
-            if (html === '') {
-                html = '<div class="no-content">This folder is empty.</div>';
-            }
-            
-            fileList.innerHTML = html;
+            fileListContainer.innerHTML = html;
         }
 
-        // Navigate to specified path
+        // Navigate to specified path (now only used to set the current upload path)
         function navigateTo(path) {
-            currentPath = path;
-            loadFiles();
+            // Since we are now searching all subdirectories for display,
+            // this function's primary purpose shifts to setting the context for uploads.
+            // For now, new uploads will go to the BASE_DIRECTORY root.
+            currentPath = path; 
         }
 
         // Refresh files
@@ -388,7 +372,7 @@ HTML_TEMPLATE = '''
         async function confirmRename() {
             const newName = document.getElementById('newFileName').value.trim();
             if (!newName) {
-                alert('New name cannot be empty.');
+                alert('新名稱不能為空。');
                 return;
             }
             
@@ -407,16 +391,16 @@ HTML_TEMPLATE = '''
                     closeModal('renameModal');
                     loadFiles();
                 } else {
-                    alert('Rename failed: ' + result.error);
+                    alert('重新命名失敗: ' + result.error);
                 }
             } catch (error) {
-                alert('An error occurred during rename.');
+                alert('重新命名時發生錯誤。');
             }
         }
 
         // Delete file/folder
         async function deleteFile(filePath, fileName) {
-            if (!confirm(`Are you sure you want to delete "${fileName}"?`)) return;
+            if (!confirm(`您確定要刪除 "${fileName}" 嗎？`)) return;
             
             try {
                 const response = await fetch('/api/delete', {
@@ -431,10 +415,10 @@ HTML_TEMPLATE = '''
                 if (result.success) {
                     loadFiles();
                 } else {
-                    alert('Delete failed: ' + result.error);
+                    alert('刪除失敗: ' + result.error);
                 }
             } catch (error) {
-                alert('An error occurred during deletion.');
+                alert('刪除時發生錯誤。');
             }
         }
 
@@ -446,7 +430,7 @@ HTML_TEMPLATE = '''
             if (files.length === 0) return;
             
             const formData = new FormData();
-            formData.append('path', currentPath);
+            formData.append('path', currentPath); // currentPath 仍然用於指定上傳目標目錄
             
             for (let i = 0; i < files.length; i++) {
                 formData.append('files', files[i]);
@@ -463,10 +447,10 @@ HTML_TEMPLATE = '''
                     loadFiles();
                     fileInput.value = ''; // Clear selected files
                 } else {
-                    alert('Upload failed: ' + result.error);
+                    alert('上傳失敗: ' + result.error);
                 }
             } catch (error) {
-                alert('An error occurred during upload.');
+                alert('上傳時發生錯誤。');
             }
         }
 
@@ -545,42 +529,76 @@ def create_thumbnail(image_path, thumbnail_size=(300, 300)): # Increased thumbna
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-# 移除 api_usb_devices 路由，因為現在只處理一個固定目錄
-
 @app.route('/api/files')
 def api_files():
-    relative_path_str = request.args.get('path', '')
-
-    # 確保基本目錄存在且可訪問
+    # 由於要搜尋所有子資料夾，relative_path_str 在此路由下不再用於導航，
+    # 但如果日後需要瀏覽特定子資料夾，可以重新啟用其功能。
+    # 目前此請求始終返回 BASE_DIRECTORY 下的所有圖片。
+    
     base_dir_path = Path(BASE_DIRECTORY).resolve()
     if not base_dir_path.is_dir():
         return jsonify({'error': f'Base directory not found or not accessible: {BASE_DIRECTORY}'}), 500
 
-    # 解析目標目錄，並確保它在基本目錄內
-    current_dir = (base_dir_path / unquote(relative_path_str)).resolve()
+    files_info = []
+    
+    # 遞迴地遍歷基本目錄及其所有子目錄
+    for root, dirs, files in os.walk(base_dir_path):
+        # 為了安全和性能，可以選擇性地跳過某些目錄
+        # 例如：dirs[:] = [d for d in dirs if d not in ['.git', '__pycache__']]
 
-    try:
-        current_dir.relative_to(base_dir_path)
-    except ValueError:
-        return jsonify({'error': 'Access denied: Path outside allowed directory'}), 403
+        for file_name in files:
+            full_item_path = Path(root) / file_name
+            
+            # 確保檔案在 BASE_DIRECTORY 內，防止目錄遍歷攻擊
+            try:
+                full_item_path.relative_to(base_dir_path)
+            except ValueError:
+                # 檔案不在基本目錄內，跳過
+                continue
 
-    if not current_dir.is_dir():
-        return jsonify({'error': 'Path is not a directory or does not exist'}), 404
+            file_info = get_file_info(str(full_item_path), str(base_dir_path))
+            
+            # 僅包含圖片檔案
+            if file_info and file_info['type'] == 'image':
+                files_info.append(file_info)
 
-    try:
-        files = []
-        for item in os.listdir(current_dir):
-            full_item_path = current_dir / item
-            file_info = get_file_info(str(full_item_path), str(base_dir_path)) # Pass base_dir_path
-            if file_info:
-                files.append(file_info)
+    # Sort files by modification time, newest first
+    files_info.sort(key=lambda x: datetime.strptime(x['modified'], '%Y-%m-%d %H:%M:%S'), reverse=True)
+
+    grouped_files = {}
+    for file in files_info:
+        # Get the year and month for grouping (e.g., "2023年1月")
+        modified_dt = datetime.strptime(file['modified'], '%Y-%m-%d %H:%M:%S')
+        group_key_month = modified_dt.strftime('%Y年%m月')
+        group_key_day = modified_dt.strftime('%Y年%m月%d日 %A') # e.g., "2023年1月2日 星期一"
+
+        if group_key_month not in grouped_files:
+            grouped_files[group_key_month] = {
+                'title_month': group_key_month,
+                'days': {}
+            }
         
-        # Sort: directories first, then by name
-        files.sort(key=lambda x: (not x['is_directory'], x['name'].lower()))
+        if group_key_day not in grouped_files[group_key_month]['days']:
+            grouped_files[group_key_month]['days'][group_key_day] = {
+                'title_day': group_key_day,
+                'items': []
+            }
         
-        return jsonify({'files': files})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        grouped_files[group_key_month]['days'][group_key_day]['items'].append(file)
+
+    # Convert grouped_files to a list for ordered iteration in Jinja2 (or JS)
+    # Sort months in descending order
+    ordered_grouped_files = []
+    for month_key in sorted(grouped_files.keys(), reverse=True):
+        month_data = grouped_files[month_key]
+        # Sort days within each month in descending order
+        ordered_days = []
+        for day_key in sorted(month_data['days'].keys(), reverse=True):
+            ordered_days.append(month_data['days'][day_key])
+        month_data['days'] = ordered_days
+        ordered_grouped_files.append(month_data)
+
+    return jsonify({'grouped_files': ordered_grouped_files})
 
 @app.route('/api/thumbnail')
 def api_thumbnail():
@@ -708,6 +726,9 @@ def api_delete():
 
 @app.route('/api/upload', methods=['POST'])
 def api_upload():
+    # currentPath 在前端用於指示上傳目標目錄。
+    # 由於現在顯示的是所有圖片的扁平視圖，currentPath 通常為空字串，
+    # 這意味著上傳會到 BASE_DIRECTORY 的根目錄。
     relative_path_str = request.form.get('path', '')
 
     base_dir_path = Path(BASE_DIRECTORY).resolve()
@@ -720,7 +741,11 @@ def api_upload():
         return jsonify({'success': False, 'error': 'Access denied: Target path outside allowed directory'}), 403
 
     if not target_dir.is_dir():
-        return jsonify({'success': False, 'error': 'Target directory not found or is not a directory'})
+        # 如果目標不是資料夾，或不存在，預設上傳到根目錄
+        # 否則上傳會失敗。
+        target_dir = base_dir_path
+        print(f"Warning: Target upload path '{relative_path_str}' is not a directory or does not exist. Uploading to base directory: {target_dir}")
+
 
     files = request.files.getlist('files')
     if not files:
@@ -756,4 +781,3 @@ if __name__ == '__main__':
     print(f"Serving files from: {BASE_DIRECTORY}")
     print("Web server running at http://127.0.0.1:5000/")
     app.run(debug=True, host='0.0.0.0', port=5000)
-
