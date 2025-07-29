@@ -16,14 +16,15 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 # Root directory for file operations.
 # IMPORTANT: If this path doesn't exist or isn't accessible, the application will not function correctly.
 # Ensure this path is valid before deployment.
-BASE_DIRECTORY = "/media/norman/新增磁碟區"
+# 請將此路徑更改為您要掃描圖片的實際目錄
+BASE_DIRECTORY = "/media/norman/新增磁碟區" 
 
 # Define common RAW file extensions.
 # We will check both lowercase and uppercase versions dynamically.
 RAW_EXTENSIONS = ['.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.rw2', '.raf', '.pef', '.srw', '.kdc', '.mos', '.3fr', '.erf', '.mef', '.nrw', '.qtk', '.x3f']
 
 
-# HTML Template (此部分沒有變動)
+# HTML Template (包含手機螢幕兩張圖片一行的 CSS 調整)
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -56,6 +57,16 @@ HTML_TEMPLATE = '''
             grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
             gap: 8px;
         }
+        /* Mobile specific styles for 2 columns */
+        @media (max-width: 768px) { /* Adjust breakpoint as needed for "mobile screen size" */
+            .file-grid {
+                grid-template-columns: repeat(2, 1fr); /* Two columns for smaller screens */
+            }
+            .file-item {
+                height: 120px; /* Slightly reduce height for smaller screens if needed */
+            }
+        }
+
         .file-item {
             background: #fff;
             border: 1px solid #dadce0;
@@ -680,4 +691,5 @@ if __name__ == '__main__':
     
     print(f"Serving files from: {BASE_DIRECTORY}")
     print("Web server running at http://127.0.0.1:5000/")
+    # 設置 host='0.0.0.0' 以允許從其他設備訪問，debug=True 方便開發
     app.run(debug=True, host='0.0.0.0', port=5000)
