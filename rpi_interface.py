@@ -2,6 +2,7 @@ import pygame
 import time
 from datetime import datetime
 import threading
+import re
 import subprocess
 import qrcode
 import io
@@ -16,6 +17,13 @@ class RPiProductInterface:
         self.debug_mode = debug_mode
         self.running = True
         self.data_collector = DataCollector()
+
+        # UI State Management
+        self.current_view = 'main' # 'main', 'wifi_list', 'password_input'
+        self.wifi_scan_result = []
+        self.selected_ssid = ""
+        self.password_input = ""
+        self.wifi_list_page = 0
         
         self.sd_copy_manager = SDCopyManager()
         self.sd_copy_manager.set_event_callback(self.update_copy_status)
@@ -101,7 +109,13 @@ class RPiProductInterface:
             'refresh': pygame.Rect(self.width - int(self.width * 0.25) - self.layout['card_margin'],
                                    self.layout['card_margin'] * 0.5,
                                    int(self.width * 0.12),
-                                   int(self.layout['header_height'] * 0.8)),
+                                   int(self.layout['header_height'] * 0.8)),                                   
+            'change_wifi': pygame.Rect(0, 0, 0, 0), # Will be set in draw_network_card
+            'wifi_list_back': pygame.Rect(self.layout['card_margin'], self.layout['card_margin'], int(self.width * 0.15), int(self.height * 0.08)),
+            'password_back': pygame.Rect(self.layout['card_margin'], self.layout['card_margin'], int(self.width * 0.15), int(self.height * 0.08)),
+            'password_connect': pygame.Rect(0, 0, 0, 0), # Will be set in draw_password_input_view
+            'wifi_page_prev': pygame.Rect(0, 0, 0, 0), # Will be set in draw_wifi_list_view
+            'wifi_page_next': pygame.Rect(0, 0, 0, 0), # Will be set in draw_wifi_list_view
             'copy_stop': pygame.Rect(0, 0, 0, 0)
         }
 
@@ -239,6 +253,16 @@ class RPiProductInterface:
         status_color = self.colors['success'] if self.data_collector.data['connection_status'] == "Connected" else self.colors['error']
         status_text = self.font_small.render(f"Status: {self.data_collector.data['connection_status']}", True, status_color)
         self.screen.blit(status_text, (x, y))
+
+        # Add "Change WiFi" button
+        button_width = self.font_small.render("Change WiFi", True, self.colors['text']).get_width() + self.layout['card_padding'] * 2
+        button_height = self.font_small.get_height() + self.layout['card_padding']
+        button_x = x + ip_text.get_width() + self.layout['card_padding'] * 2
+        button_y = card_rect.y + self.layout['line_spacing_medium']
+        self.touch_areas['change_wifi'] = pygame.Rect(button_x, button_y, button_width, button_height)
+        pygame.draw.rect(self.screen, self.colors['accent'], self.touch_areas['change_wifi'], border_radius=5)
+        change_wifi_text = self.font_small.render("Change WiFi", True, self.colors['text'])
+        self.screen.blit(change_wifi_text, (button_x + self.layout['card_padding'], button_y + (button_height - change_wifi_text.get_height()) // 2))
 
         if self.qrcode_surface:
             scaled_qrcode = pygame.transform.scale(self.qrcode_surface, (int(qrcode_target_size), int(qrcode_target_size)))
@@ -398,6 +422,195 @@ class RPiProductInterface:
             stop_rect = stop_text.get_rect(center=self.touch_areas['copy_stop'].center)
             self.screen.blit(stop_text, stop_rect)
 
+    def draw_wifi_list_view(self):
+        """Draws the screen for selecting a WiFi network."""
+        self.screen.fill(self.colors['bg'])
+        
+        # Back button
+        pygame.draw.rect(self.screen, self.colors['error'], self.touch_areas['wifi_list_back'], border_radius=5)
+        back_text = self.font_small.render("Back", True, self.colors['text'])
+        self.screen.blit(back_text, (self.touch_areas['wifi_list_back'].x + 20, self.touch_areas['wifi_list_back'].y + 10))
+
+        title_text = self.font_medium.render("Select a WiFi Network", True, self.colors['accent'])
+        self.screen.blit(title_text, (self.width // 2 - title_text.get_width() // 2, self.layout['card_margin']))
+
+        if not self.wifi_scan_result:
+            info_text = self.font_medium.render("Scanning for WiFi...", True, self.colors['text_dim'])
+            self.screen.blit(info_text, (self.width // 2 - info_text.get_width() // 2, self.height // 2 - info_text.get_height() // 2))
+            return
+
+        # --- Pagination Logic ---
+        footer_height = int(self.height * 0.12)
+        list_y_start = self.layout['header_height']
+        list_height = self.height - list_y_start - footer_height - self.layout['card_margin']
+        list_area_rect = pygame.Rect(self.layout['card_margin'], list_y_start, self.width - self.layout['card_margin']*2, list_height)
+
+        item_height = self.font_small.get_height() + self.layout['card_padding'] * 3
+        item_spacing = self.layout['card_margin']
+        items_per_page = max(1, list_height // (item_height + item_spacing))
+        total_pages = (len(self.wifi_scan_result) + items_per_page - 1) // items_per_page
+        start_index = self.wifi_list_page * items_per_page
+        end_index = start_index + items_per_page
+        page_items = self.wifi_scan_result[start_index:end_index]
+
+        self.touch_areas['wifi_items'] = []
+        y_pos = 0
+        for ssid in page_items:
+            item_rect_on_screen = pygame.Rect(list_area_rect.x, list_area_rect.y + y_pos, list_area_rect.width, item_height)
+            connect_button_width = self.font_small.render("Connect", True, self.colors['text']).get_width() + self.layout['card_padding'] * 2
+            connect_button_height = item_height - self.layout['card_padding']
+            connect_button_rect = pygame.Rect(
+                item_rect_on_screen.right - connect_button_width - self.layout['card_padding'],
+                item_rect_on_screen.y + (item_height - connect_button_height) // 2,
+                connect_button_width,
+                connect_button_height
+            )
+            
+            pygame.draw.rect(self.screen, self.colors['card'], item_rect_on_screen, border_radius=5)
+            
+            # Draw SSID text
+            ssid_text = self.font_small.render(ssid, True, self.colors['text'])
+            self.screen.blit(ssid_text, (item_rect_on_screen.x + self.layout['card_padding'], item_rect_on_screen.y + (item_height - ssid_text.get_height()) // 2))
+
+            # Draw Connect button
+            pygame.draw.rect(self.screen, self.colors['accent'], connect_button_rect, border_radius=5)
+            connect_text = self.font_small.render("Connect", True, self.colors['text'])
+            self.screen.blit(connect_text, (connect_button_rect.centerx - connect_text.get_width() // 2, connect_button_rect.centery - connect_text.get_height() // 2))
+            
+            self.touch_areas['wifi_items'].append({'ssid': ssid, 'rect': item_rect_on_screen, 'connect_rect': connect_button_rect})
+            y_pos += item_height + item_spacing
+
+        # --- Draw Footer with Page Buttons ---
+        footer_y = self.height - footer_height
+        button_width = int(self.width * 0.2)
+        button_height = int(footer_height * 0.7)
+        
+        # Previous Page Button
+        if self.wifi_list_page > 0:
+            prev_rect = pygame.Rect(self.layout['card_margin'], footer_y + (footer_height - button_height) // 2, button_width, button_height)
+            self.touch_areas['wifi_page_prev'] = prev_rect
+            pygame.draw.rect(self.screen, self.colors['accent'], prev_rect, border_radius=5)
+            prev_text = self.font_small.render("Prev", True, self.colors['text'])
+            self.screen.blit(prev_text, (prev_rect.centerx - prev_text.get_width() // 2, prev_rect.centery - prev_text.get_height() // 2))
+
+        # Page Indicator
+        page_indicator_text = f"Page {self.wifi_list_page + 1} / {total_pages}"
+        page_text = self.font_small.render(page_indicator_text, True, self.colors['text_dim'])
+        self.screen.blit(page_text, (self.width // 2 - page_text.get_width() // 2, footer_y + (footer_height - page_text.get_height()) // 2))
+
+        # Next Page Button
+        if self.wifi_list_page < total_pages - 1:
+            next_rect = pygame.Rect(self.width - self.layout['card_margin'] - button_width, footer_y + (footer_height - button_height) // 2, button_width, button_height)
+            self.touch_areas['wifi_page_next'] = next_rect
+            pygame.draw.rect(self.screen, self.colors['accent'], next_rect, border_radius=5)
+            next_text = self.font_small.render("Next", True, self.colors['text'])
+            self.screen.blit(next_text, (next_rect.centerx - next_text.get_width() // 2, next_rect.centery - next_text.get_height() // 2))
+
+
+    def draw_password_input_view(self):
+        """Draws the on-screen keyboard for password input."""
+        self.screen.fill(self.colors['bg'])
+
+        # Back button
+        pygame.draw.rect(self.screen, self.colors['error'], self.touch_areas['password_back'], border_radius=5)
+        back_text = self.font_small.render("Back", True, self.colors['text'])
+        self.screen.blit(back_text, (self.touch_areas['password_back'].x + 20, self.touch_areas['password_back'].y + 10))
+
+        title_text = self.font_medium.render(f"Password for {self.selected_ssid}", True, self.colors['accent'])
+        self.screen.blit(title_text, (self.width // 2 - title_text.get_width() // 2, self.layout['card_margin']))
+
+        # Password display box
+        input_box_y = self.layout['header_height']
+        input_box_rect = pygame.Rect(self.layout['card_margin'], input_box_y, self.width - self.layout['card_margin']*2, 50)
+        pygame.draw.rect(self.screen, self.colors['card'], input_box_rect, border_radius=5)
+        password_display = '*' * len(self.password_input)
+        password_text = self.font_medium.render(password_display, True, self.colors['text'])
+        self.screen.blit(password_text, (input_box_rect.x + 10, input_box_rect.y + 5))
+
+        # Keyboard layout
+        keys = [
+            "1234567890",
+            "qwertyuiop",
+            "asdfghjkl",
+            "zxcvbnm"
+        ]
+        key_size = int(self.width * 0.08)
+        key_margin = int(self.width * 0.01)
+        keyboard_y_start = input_box_y + 60
+
+        self.touch_areas['keyboard_keys'] = []
+        y = keyboard_y_start
+        for row in keys:
+            x = (self.width - (len(row) * (key_size + key_margin))) // 2
+            for char in row:
+                key_rect = pygame.Rect(x, y, key_size, key_size)
+                self.touch_areas['keyboard_keys'].append({'char': char, 'rect': key_rect})
+                pygame.draw.rect(self.screen, self.colors['card'], key_rect, border_radius=5)
+                char_text = self.font_small.render(char, True, self.colors['text'])
+                self.screen.blit(char_text, (key_rect.centerx - char_text.get_width()//2, key_rect.centery - char_text.get_height()//2))
+                x += key_size + key_margin
+            y += key_size + key_margin
+
+        # Special keys (Backspace and Connect)
+        backspace_rect = pygame.Rect(self.width - key_size*2 - key_margin*2, keyboard_y_start + (key_size + key_margin) * 2, key_size*2, key_size)
+        self.touch_areas['keyboard_keys'].append({'char': 'backspace', 'rect': backspace_rect})
+        pygame.draw.rect(self.screen, self.colors['warning'], backspace_rect, border_radius=5)
+        backspace_text = self.font_small.render("<-", True, self.colors['text'])
+        self.screen.blit(backspace_text, (backspace_rect.centerx - backspace_text.get_width()//2, backspace_rect.centery - backspace_text.get_height()//2))
+
+        connect_rect = pygame.Rect(self.width - key_size*2 - key_margin*2, keyboard_y_start + (key_size + key_margin) * 3, key_size*2, key_size)
+        self.touch_areas['password_connect'] = connect_rect
+        pygame.draw.rect(self.screen, self.colors['success'], connect_rect, border_radius=5)
+        connect_text = self.font_small.render("Connect", True, self.colors['text'])
+        self.screen.blit(connect_text, (connect_rect.centerx - connect_text.get_width()//2, connect_rect.centery - connect_text.get_height()//2))
+
+    def connect_to_wifi(self):
+        """Attempts to connect to the selected WiFi network."""
+        print(f"Attempting to connect to SSID: {self.selected_ssid}")
+        self.current_view = 'main' # Go back to main view to show status
+        self.sd_copy_manager.status_message = f"Connecting to {self.selected_ssid}..."
+        self.sd_copy_manager._update_ui()
+        pygame.display.flip() # Update screen to show message
+
+        try:
+            # Create the network block for wpa_supplicant.conf
+            network_block = f'\nnetwork={{\n    ssid="{self.selected_ssid}"\n    psk="{self.password_input}"\n    key_mgmt=WPA-PSK\n}}\n'
+            
+            # This is a simplified approach. A more robust solution would parse the file.
+            # For this implementation, we append the new network.
+            # It's recommended to manage this file more carefully in a production environment.
+            with open("/etc/wpa_supplicant/wpa_supplicant.conf", "a") as f:
+                # Using sudo with shell=True is a security risk, but often necessary for this task.
+                # A better way is to use a helper script with specific sudo permissions.
+                subprocess.run(f'echo "{network_block}" | sudo tee -a /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null', shell=True, check=True)
+
+            # Reconfigure the interface
+            subprocess.run(['sudo', 'wpa_cli', '-i', 'wlan0', 'reconfigure'], check=True)
+            
+            print("wpa_supplicant.conf updated. Waiting for connection...")
+            self.sd_copy_manager.status_message = "Reconfiguring network..."
+            self.sd_copy_manager._update_ui()
+            pygame.display.flip()
+            time.sleep(10) # Give it time to connect
+
+            # Force data update to get new IP and connection status
+            self.update_all_data()
+            if self.data_collector.data['connection_status'] == "Connected":
+                self.sd_copy_manager.status_message = f"Connected to {self.selected_ssid}!"
+            else:
+                self.sd_copy_manager.status_message = f"Failed to connect to {self.selected_ssid}."
+
+        except subprocess.CalledProcessError as e:
+            print(f"Error connecting to WiFi: {e}")
+            self.sd_copy_manager.status_message = "Error during connection."
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+            self.sd_copy_manager.status_message = "Unexpected connection error."
+        
+        self.password_input = ""
+        self.selected_ssid = ""
+        self.sd_copy_manager._update_ui()
+
 
     def draw_status_bar(self):
         """Draws the bottom status bar with update time and running status"""
@@ -426,10 +639,49 @@ class RPiProductInterface:
             elif self.touch_areas['restart'].collidepoint(pos):
                 print("Restarting system...")
                 subprocess.run(['sudo', 'reboot'])
-            # Handle copy stop button, only if copying AND SSD is present
-            elif self.copy_status_data.get('ssd_present', False) and self.copy_status_data.get('is_copying', False) and self.touch_areas['copy_stop'].collidepoint(pos):
-                print("Copy stop button pressed.")
-                self.sd_copy_manager.stop_copy()
+        
+        if self.current_view == 'main':
+            if self.touch_areas['change_wifi'].collidepoint(pos):
+                print("Change WiFi button pressed. Scanning for networks...")
+                self.current_view = 'wifi_list'
+                self.wifi_list_page = 0 # Reset page on view change
+                self.wifi_scan_result = [] # Clear previous results
+                # Scan in a new thread to avoid freezing the UI
+                threading.Thread(target=lambda: setattr(self, 'wifi_scan_result', self.data_collector.get_available_wifi_networks()), daemon=True).start()
+
+        elif self.current_view == 'wifi_list':
+            if self.touch_areas['wifi_list_back'].collidepoint(pos):
+                self.current_view = 'main'
+            
+            if self.touch_areas.get('wifi_page_prev') and self.touch_areas['wifi_page_prev'].collidepoint(pos):
+                if self.wifi_list_page > 0:
+                    self.wifi_list_page -= 1
+            elif self.touch_areas.get('wifi_page_next') and self.touch_areas['wifi_page_next'].collidepoint(pos):
+                self.wifi_list_page += 1 # Boundary check is implicit in drawing logic
+
+            for item in self.touch_areas.get('wifi_items', []):
+                if item['connect_rect'].collidepoint(pos):
+                    self.selected_ssid = item['ssid']
+                    self.password_input = "" # Clear old password
+                    self.current_view = 'password_input'
+                    print(f"Selected SSID: {self.selected_ssid}")
+                    break
+
+        elif self.current_view == 'password_input':
+            if self.touch_areas['password_back'].collidepoint(pos):
+                self.current_view = 'wifi_list'
+            elif self.touch_areas['password_connect'].collidepoint(pos):
+                threading.Thread(target=self.connect_to_wifi, daemon=True).start()
+            for key in self.touch_areas.get('keyboard_keys', []):
+                if key['rect'].collidepoint(pos):
+                    if key['char'] == 'backspace':
+                        self.password_input = self.password_input[:-1]
+                    else:
+                        self.password_input += key['char']
+                    break
+        elif self.copy_status_data.get('ssd_present', False) and self.copy_status_data.get('is_copying', False) and self.touch_areas['copy_stop'].collidepoint(pos):
+            print("Copy stop button pressed.")
+            self.sd_copy_manager.stop_copy()
 
 
     def run(self):
@@ -450,30 +702,36 @@ class RPiProductInterface:
                             self.running = False
                         elif event.key == pygame.K_F5:
                             self.update_all_data()
-                    elif event.type in [pygame.MOUSEBUTTONDOWN, pygame.FINGERDOWN]:
-                        if event.type == pygame.MOUSEBUTTONDOWN:
-                            self.handle_touch(event.pos)
-                        else:
-                            touch_pos = (int(event.x * self.width), int(event.y * self.height))
-                            self.handle_touch(touch_pos)
+                    elif event.type == pygame.MOUSEBUTTONDOWN:
+                        self.handle_touch(event.pos)
+                    elif event.type == pygame.FINGERDOWN:
+                        touch_pos = (int(event.x * self.width), int(event.y * self.height))
+                        self.handle_touch(touch_pos)
+                    elif event.type == pygame.FINGERUP:
+                        pass # FINGERUP is now only for ending a drag, which we removed.
 
-                self.screen.fill(self.colors['bg'])
-
-                self.draw_header()
-                
-                # Draw network card first, and get its bottom Y for subsequent elements
-                network_card_bottom_y = self.draw_network_card() 
-                
-                # Calculate USB card's y_start based on network card's bottom
-                usb_card_y_start = network_card_bottom_y + self.layout['card_margin']
-                # Draw USB card and get its bottom Y
-                usb_card_bottom_y = self.draw_usb_card(usb_card_y_start) 
-                
-                # Calculate progress bar's y_start based on USB card's bottom
-                progress_bar_y_start = usb_card_bottom_y + self.layout['card_margin']
-                self.draw_progress_bar_card(progress_bar_y_start)
-                
-                self.draw_status_bar()
+                # View-based rendering
+                if self.current_view == 'main':
+                    self.screen.fill(self.colors['bg'])
+                    self.draw_header()
+                    
+                    # Draw network card first, and get its bottom Y for subsequent elements
+                    network_card_bottom_y = self.draw_network_card() 
+                    
+                    # Calculate USB card's y_start based on network card's bottom
+                    usb_card_y_start = network_card_bottom_y + self.layout['card_margin']
+                    # Draw USB card and get its bottom Y
+                    usb_card_bottom_y = self.draw_usb_card(usb_card_y_start) 
+                    
+                    # Calculate progress bar's y_start based on USB card's bottom
+                    progress_bar_y_start = usb_card_bottom_y + self.layout['card_margin']
+                    self.draw_progress_bar_card(progress_bar_y_start)
+                    
+                    self.draw_status_bar()
+                elif self.current_view == 'wifi_list':
+                    self.draw_wifi_list_view()
+                elif self.current_view == 'password_input':
+                    self.draw_password_input_view()
 
                 pygame.display.flip()
                 clock.tick(30)

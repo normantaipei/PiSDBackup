@@ -119,3 +119,27 @@ class DataCollector:
 
         self.data['last_update'] = time.time()
 
+    def get_available_wifi_networks(self):
+        """Scans for and returns a list of available WiFi SSIDs."""
+        networks = []
+        try:
+            # Use iwlist to scan for networks. Requires the 'wireless-tools' package.
+            # Ensure the interface 'wlan0' is correct for your Raspberry Pi.
+            scan_output = subprocess.check_output(
+                ['sudo', 'iwlist', 'wlan0', 'scan'],
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            
+            # Parse the output to find SSIDs
+            # The regex looks for lines like 'ESSID:"MyNetwork"'
+            essid_matches = re.findall(r'ESSID:"([^"]+)"', scan_output)
+            
+            # Return a list of unique, non-empty SSIDs
+            if essid_matches:
+                networks = sorted(list(set([name for name in essid_matches if name])))
+        except subprocess.CalledProcessError as e:
+            print(f"Error scanning for WiFi networks: {e.output}")
+        except FileNotFoundError:
+            print("Error: 'iwlist' command not found. Is 'wireless-tools' installed?")
+        return networks
