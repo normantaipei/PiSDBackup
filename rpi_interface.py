@@ -5,6 +5,7 @@ import threading
 import re
 import subprocess
 import qrcode
+import os
 import io
 from data_collector import DataCollector
 from sd_copy_manager import SDCopyManager
@@ -523,7 +524,7 @@ class RPiProductInterface:
         input_box_y = self.layout['header_height']
         input_box_rect = pygame.Rect(self.layout['card_margin'], input_box_y, self.width - self.layout['card_margin']*2, 50)
         pygame.draw.rect(self.screen, self.colors['card'], input_box_rect, border_radius=5)
-        password_display = '*' * len(self.password_input)
+        password_display = self.password_input
         password_text = self.font_medium.render(password_display, True, self.colors['text'])
         self.screen.blit(password_text, (input_box_rect.x + 10, input_box_rect.y + 5))
 
@@ -569,47 +570,81 @@ class RPiProductInterface:
         print(f"Attempting to connect to SSID: {self.selected_ssid}")
         self.current_view = 'main' # Go back to main view to show status
         self.sd_copy_manager.status_message = f"Connecting to {self.selected_ssid}..."
-        self.sd_copy_manager._update_ui()
-        pygame.display.flip() # Update screen to show message
 
-        try:
-            # Create the network block for wpa_supplicant.conf
-            network_block = f'\nnetwork={{\n    ssid="{self.selected_ssid}"\n    psk="{self.password_input}"\n    key_mgmt=WPA-PSK\n}}\n'
-            
-            # This is a simplified approach. A more robust solution would parse the file.
-            # For this implementation, we append the new network.
-            # It's recommended to manage this file more carefully in a production environment.
-            with open("/etc/wpa_supplicant/wpa_supplicant.conf", "a") as f:
-                # Using sudo with shell=True is a security risk, but often necessary for this task.
-                # A better way is to use a helper script with specific sudo permissions.
-                subprocess.run(f'echo "{network_block}" | sudo tee -a /etc/wpa_supplicant/wpa_supplicant.conf > /dev/null', shell=True, check=True)
+        def run_connection_logic():
+            try:
+                # Restart the wpa_supplicant service to ensure it's in a clean state.
+                # This can resolve issues where wpa_cli fails to communicate with the service.
+                print("Restarting wpa_supplicant service...")
+                subprocess.run(['sudo', 'systemctl', 'restart', 'wpa_supplicant.service'], check=True)
+                time.sleep(2) # Give the service a moment to restart
 
-            # Reconfigure the interface
-            subprocess.run(['sudo', 'wpa_cli', '-i', 'wlan0', 'reconfigure'], check=True)
-            
-            print("wpa_supplicant.conf updated. Waiting for connection...")
-            self.sd_copy_manager.status_message = "Reconfiguring network..."
-            self.sd_copy_manager._update_ui()
-            pygame.display.flip()
-            time.sleep(10) # Give it time to connect
+                # Ensure wpa_supplicant.conf allows updates via wpa_cli
+                wpa_conf_dir = "/etc/wpa_supplicant"
+                wpa_conf_path = os.path.join(wpa_conf_dir, "wpa_supplicant.conf")
+                
+                try:
+                    # Check if the file exists. If not, create it with the required content.
+                    if not os.path.exists(wpa_conf_path):
+                        print(f"'{wpa_conf_path}' does not exist. Creating it.")
+                        # Ensure the directory exists
+                        subprocess.run(f'sudo mkdir -p {wpa_conf_dir}', shell=True, check=True)
+                        # Create the file with initial config
+                        initial_config = 'ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\nupdate_config=1\n'
+                        subprocess.run(f"echo '{initial_config}' | sudo tee {wpa_conf_path} > /dev/null", shell=True, check=True)
+                    else:
+                        # If file exists, ensure update_config=1 is present
+                        conf_content = subprocess.check_output(['sudo', 'cat', wpa_conf_path], text=True)
+                        if 'update_config=1' not in conf_content:
+                            print(f"'{wpa_conf_path}' is missing 'update_config=1'. Adding it.")
+                            subprocess.run(f"echo 'update_config=1' | sudo tee -a {wpa_conf_path} > /dev/null", shell=True, check=True)
+                    subprocess.check_call(['sudo', 'wpa_cli', '-i', 'wlan0', 'reconfigure'])
+                except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                    print(f"Warning: Could not create or update {wpa_conf_path}: {e}")
 
-            # Force data update to get new IP and connection status
-            self.update_all_data()
-            if self.data_collector.data['connection_status'] == "Connected":
-                self.sd_copy_manager.status_message = f"Connected to {self.selected_ssid}!"
-            else:
-                self.sd_copy_manager.status_message = f"Failed to connect to {self.selected_ssid}."
+                # Use wpa_cli for a more robust connection method
+                # 1. Add a new network configuration
+                add_net_output = subprocess.check_output(['sudo', 'wpa_cli', '-i', 'wlan0', 'add_network'], text=True)
+                network_id = add_net_output.strip()
+                if not network_id.isdigit():
+                    raise ValueError(f"Failed to add network, received: {network_id}")
+                print(f"Added new network with ID: {network_id}")
 
-        except subprocess.CalledProcessError as e:
-            print(f"Error connecting to WiFi: {e}")
-            self.sd_copy_manager.status_message = "Error during connection."
-        except Exception as e:
-            print(f"An unexpected error occurred: {e}")
-            self.sd_copy_manager.status_message = "Unexpected connection error."
-        
-        self.password_input = ""
-        self.selected_ssid = ""
-        self.sd_copy_manager._update_ui()
+                # 2. Set the SSID and password for the new network
+                subprocess.check_call(['sudo', 'wpa_cli', '-i', 'wlan0', 'set_network', network_id, 'ssid', f'"{self.selected_ssid}"'])
+                subprocess.check_call(['sudo', 'wpa_cli', '-i', 'wlan0', 'set_network', network_id, 'psk', f'"{self.password_input}"'])
+
+                # 3. Enable the network and save the configuration
+                subprocess.check_call(['sudo', 'wpa_cli', '-i', 'wlan0', 'enable_network', network_id])
+                subprocess.check_call(['sudo', 'wpa_cli', '-i', 'wlan0', 'save_config'])
+
+                self.sd_copy_manager.status_message = "Connecting..."
+
+                # 4. Wait for connection by polling for an IP address
+                connected = False
+                for _ in range(15): # Wait up to 30 seconds
+                    time.sleep(2)
+                    self.update_all_data()
+                    if self.data_collector.data['connection_status'] == "Connected":
+                        connected = True
+                        break
+                
+                if connected:
+                    self.sd_copy_manager.status_message = f"Connected to {self.selected_ssid}!"
+                else:
+                    self.sd_copy_manager.status_message = f"Failed to connect to {self.selected_ssid}."
+
+            except (subprocess.CalledProcessError, ValueError) as e:
+                print(f"Error connecting to WiFi: {e}")
+                self.sd_copy_manager.status_message = "Error during connection."
+            except Exception as e:
+                print(f"An unexpected error occurred: {e}")
+                self.sd_copy_manager.status_message = "Unexpected connection error."
+            finally:
+                self.password_input = ""
+                self.selected_ssid = ""
+
+        threading.Thread(target=run_connection_logic, daemon=True).start()
 
 
     def draw_status_bar(self):

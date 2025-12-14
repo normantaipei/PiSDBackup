@@ -149,31 +149,21 @@ class SDCopyManager:
                 print(f"DEBUG: Skipping (this is the target SSD): {mountpoint}")
                 continue
 
-            # 3. Check if it's a removable device (e.g., USB stick, SD card).
-            # On Linux, these are usually mounted under /media or /mnt or /run/media.
-            # And device names are typically /dev/sdX or /dev/mmcblkX (SD card).
-            is_removable_device_path = (mountpoint.startswith('/media/') or mountpoint.startswith('/mnt/') or mountpoint.startswith('/run/media/'))
-            is_removable_device_type = (device_name.startswith('/dev/sd') or device_name.startswith('/dev/mmcblk') or device_name.startswith('/dev/loop')) # Added /dev/loop
-
-            if is_removable_device_path and is_removable_device_type:
-                print(f"DEBUG: Candidate external device found: {mountpoint} ({device_name})")
-                # Additionally check if the mount point is readable and writable, and not read-only
-                if os.access(mountpoint, os.R_OK) and os.access(mountpoint, os.W_OK):
-                    test_file = os.path.join(mountpoint, f".write_test_{os.getpid()}")
-                    try:
-                        with open(test_file, 'w') as f:
-                            f.write("test")
-                        os.remove(test_file)
-                        usb_devices.append(mountpoint)
-                        print(f"Detected external USB source device: {mountpoint} ({device_name}) - writable")
-                    except IOError as e:
-                        print(f"Warning: Detected external device {mountpoint} but cannot write (read-only or permission denied): {e}")
-                    except Exception as e:
-                        print(f"Warning: Detected external device {mountpoint} but an unexpected error occurred during write test: {e}")
-                else:
-                    print(f"Warning: Detected external device {mountpoint} but it's not readable/writable or is read-only.")
-            else:
-                print(f"DEBUG: Skipping (does not match external device path or type): {mountpoint} ({device_name})")
+            # 3. Broader check: any non-system, non-SSD mount point is a candidate.
+            # We will verify writability to confirm it's a valid source.
+            print(f"DEBUG: Candidate external device found: {mountpoint} ({device_name})")
+            if os.access(mountpoint, os.R_OK) and os.access(mountpoint, os.W_OK):
+                test_file = os.path.join(mountpoint, f".write_test_{os.getpid()}")
+                try:
+                    with open(test_file, 'w') as f:
+                        f.write("test")
+                    os.remove(test_file)
+                    usb_devices.append(mountpoint)
+                    print(f"Detected external USB source device: {mountpoint} ({device_name}) - writable")
+                except (IOError, OSError) as e:
+                    print(f"Warning: Candidate device {mountpoint} is not writable (read-only or permission error): {e}")
+                except Exception as e:
+                    print(f"Warning: An unexpected error occurred during write test for {mountpoint}: {e}")
         
         print(f"DEBUG (get_available_usb_source_devices): Scan finished. Found USB devices: {usb_devices}")
         return usb_devices
