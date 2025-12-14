@@ -17,7 +17,7 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 # IMPORTANT: If this path doesn't exist or isn't accessible, the application will not function correctly.
 # Ensure this path is valid before deployment.
 # 請將此路徑更改為您要掃描圖片的實際目錄
-BASE_DIRECTORY = "/media/norman/新增磁碟區" 
+BASE_DIRECTORY = "/mnt/backup_drive" 
 
 # Define common RAW file extensions.
 # We will check both lowercase and uppercase versions dynamically.

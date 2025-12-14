@@ -14,7 +14,7 @@ class SDCopyManager:
     and handles file duplicates and naming conflicts.
     """
     # Update the SSD mount point to your actual path
-    def __init__(self, ssd_mount_point="/media/norman/新增磁碟區"):
+    def __init__(self, ssd_mount_point="/mnt/backup_drive"):
         self.ssd_mount_point = ssd_mount_point
         self.active_usb_source_mount_point = None # Current USB source mount point being copied from
         self.is_copying = False
@@ -424,7 +424,7 @@ if __name__ == '__main__':
 
     # Initialize SDCopyManager
     # IMPORTANT: Ensure your SSD is actually mounted at this path on your Raspberry Pi!
-    manager = SDCopyManager(ssd_mount_point="/media/norman/新增磁碟區") 
+    manager = SDCopyManager(ssd_mount_point="/mnt/backup_drive") 
     manager.set_event_callback(ui_update_callback)
 
     # --- Mock Data Block (for testing purposes only, the program reads real devices during actual run) ---
@@ -452,7 +452,7 @@ if __name__ == '__main__':
     print("-----------------------------------\n")
 
     print("Starting SDCopyManager main loop.")
-    print("Please ensure your physical USB device is inserted into a location like '/media/pi/YOUR_USB_LABEL' and your physical SSD is mounted at '/media/norman/新增磁碟區'.")
+    print("Please ensure your physical USB device is inserted into a location like '/media/pi/YOUR_USB_LABEL' and your physical SSD is mounted at '/mnt/backup_drive'.")
     
     threading.Thread(target=manager.main_loop, daemon=True).start()
 
