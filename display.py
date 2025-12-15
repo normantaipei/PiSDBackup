@@ -254,6 +254,7 @@ class RPiProductInterface:
             'wifi_ssid': 'ロード中...',
             'connection_status': 'チェック中...',
             'usb_devices': [],
+            'backup_ssd': {},
             'system_info': {},
             'battery_info': {}, # バッテリー情報用
             'last_update': time.time()
@@ -340,15 +341,34 @@ WantedBy=graphical-session.target
         """USBデバイスを取得"""
         try:
             devices = []
+
+            # If backup SSD is mounted at the expected mount point, prefer showing it first
+            ssd = self.get_backup_ssd_info()
+            if ssd.get('present'):
+                devices.append({
+                    'name': ssd.get('device'),
+                    'mount': ssd.get('mount'),
+                    'total': ssd.get('total', 0),
+                    'used': ssd.get('used', 0),
+                    'free': ssd.get('free', 0),
+                    'percent': ssd.get('percent', 0)
+                })
+
             for partition in psutil.disk_partitions():
+                # Skip internal SD card partitions (commonly mmcblk0*) and the backup SSD (already added)
+                dev = partition.device or ''
+                if 'mmcblk0' in dev:
+                    continue
+                if partition.mountpoint == ssd.get('mount'):
+                    continue
+
                 if ('/media' in partition.mountpoint or 
                     '/mnt' in partition.mountpoint or
                     partition.fstype in ['vfat', 'exfat', 'ntfs']):
-                    
                     try:
                         usage = psutil.disk_usage(partition.mountpoint)
                         devices.append({
-                            'name': os.path.basename(partition.device),
+                            'name': os.path.basename(dev) if dev else partition.mountpoint,
                             'mount': partition.mountpoint,
                             'total': usage.total / (1024**3),
                             'used': usage.used / (1024**3),
@@ -360,6 +380,33 @@ WantedBy=graphical-session.target
             return devices
         except:
             return []
+
+    def get_backup_ssd_info(self):
+        """Detects the backup SSD (default mount /mnt/backup_drive) and returns usage info."""
+        mount_point = '/mnt/backup_drive'
+        info = {'present': False}
+        try:
+            if os.path.ismount(mount_point):
+                usage = psutil.disk_usage(mount_point)
+                device_name = None
+                for p in psutil.disk_partitions():
+                    if p.mountpoint == mount_point:
+                        device_name = os.path.basename(p.device)
+                        break
+
+                info = {
+                    'present': True,
+                    'mount': mount_point,
+                    'device': device_name or mount_point,
+                    'total': usage.total / (1024**3),
+                    'used': usage.used / (1024**3),
+                    'free': usage.free / (1024**3),
+                    'percent': usage.percent
+                }
+        except Exception:
+            info = {'present': False}
+
+        return info
 
     def get_system_info(self):
         """システム情報を取得"""
@@ -429,6 +476,7 @@ WantedBy=graphical-session.target
         self.data['ip_address'] = self.get_local_ip()
         self.data['wifi_ssid'] = self.get_wifi_ssid()
         self.data['usb_devices'] = self.get_usb_devices()
+        self.data['backup_ssd'] = self.get_backup_ssd_info()
         self.data['system_info'] = self.get_system_info()
         self.data['battery_info'] = self.get_battery_info() # バッテリー情報を更新
         
@@ -441,6 +489,12 @@ WantedBy=graphical-session.target
         
         self.data['last_update'] = time.time()
         self.generate_qr_code() # データ更新時にQRコードを再生成
+        if DEBUG_MODE:
+            try:
+                print("DEBUG: backup_ssd=", self.data.get('backup_ssd'))
+                print("DEBUG: usb_devices=", self.data.get('usb_devices'))
+            except Exception:
+                pass
 
     def data_update_loop(self):
         """データ更新ループ"""
@@ -584,24 +638,47 @@ WantedBy=graphical-session.target
         x = card_rect.x + self.layout['card_padding']
         y = card_rect.y + self.layout['card_padding']
         
-        # USBデバイス
-        title = self.font_small.render("USBデバイス", True, self.colors['accent'])
+        # 表示: 儲存裝置（優先顯示備份SSD，若無則顯示外接USB）
+        title = self.font_small.render("備份 SSD / USB", True, self.colors['accent'])
         self.screen.blit(title, (x, y))
         y += 18
-        
-        if self.data['usb_devices']:
-            for device in self.data['usb_devices'][:2]:  # 最大2つ表示
-                name_text = self.font_small.render(device['name'], True, self.colors['text'])
-                self.screen.blit(name_text, (x, y))
-                y += 12
-                
-                size_text = self.font_small.render(f"{device['used']:.1f}/{device['total']:.1f}GB", 
-                                                 True, self.colors['text_dim'])
-                self.screen.blit(size_text, (x, y))
-                y += 15
+
+        ssd = self.data.get('backup_ssd', {})
+        if ssd.get('present'):
+            name_text = self.font_small.render(f"SSD: {ssd.get('device')}", True, self.colors['text'])
+            self.screen.blit(name_text, (x, y))
+            y += 12
+
+            size_text = self.font_small.render(f"{ssd.get('used',0):.1f}/{ssd.get('total',0):.1f}GB ({ssd.get('percent',0):.0f}%)", 
+                                              True, self.colors['text_dim'])
+            self.screen.blit(size_text, (x, y))
+            y += 12
+
+            mount_text = self.font_small.render(f"掛載: {ssd.get('mount')}", True, self.colors['text_dim'])
+            self.screen.blit(mount_text, (x, y))
         else:
-            no_usb_text = self.font_small.render("USBデバイスなし", True, self.colors['text_dim'])
-            self.screen.blit(no_usb_text, (x, y))
+            # 顯示目標備份磁碟資訊，即使未掛載也要顯示該目標 (避免顯示內建 mmcblk0p1)
+            target_mount = '/mnt/backup_drive'
+            if not ssd.get('present'):
+                target_text = self.font_small.render(f"目標: {target_mount} (未掛載)", True, self.colors['warning'])
+                self.screen.blit(target_text, (x, y))
+                y += 14
+
+            # 列出外接裝置，過濾掉內部 SD 卡 (mmcblk*)
+            visible_devices = [d for d in self.data.get('usb_devices', []) if 'mmcblk' not in (d.get('name') or '')]
+            if visible_devices:
+                for device in visible_devices[:2]:  # 最大2つ表示
+                    name_text = self.font_small.render(device.get('name', ''), True, self.colors['text'])
+                    self.screen.blit(name_text, (x, y))
+                    y += 12
+
+                    size_text = self.font_small.render(f"{device.get('used',0):.1f}/{device.get('total',0):.1f}GB", 
+                                                     True, self.colors['text_dim'])
+                    self.screen.blit(size_text, (x, y))
+                    y += 15
+            else:
+                no_usb_text = self.font_small.render("無外接裝置", True, self.colors['text_dim'])
+                self.screen.blit(no_usb_text, (x, y))
 
     def draw_status_bar(self):
         """下部ステータスバーの描画"""

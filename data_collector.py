@@ -47,7 +47,36 @@ class DataCollector:
         """Gets USB devices"""
         try:
             devices = []
+
+            # Prefer showing configured backup SSD if mounted
+            mount_point = '/mnt/backup_drive'
+            if os.path.ismount(mount_point):
+                try:
+                    usage = psutil.disk_usage(mount_point)
+                    device_name = None
+                    for p in psutil.disk_partitions():
+                        if p.mountpoint == mount_point:
+                            device_name = os.path.basename(p.device)
+                            break
+                    devices.append({
+                        'name': device_name or os.path.basename(mount_point),
+                        'mount': mount_point,
+                        'total': usage.total / (1024**3),
+                        'used': usage.used / (1024**3),
+                        'free': usage.free / (1024**3),
+                        'percent': usage.percent
+                    })
+                except Exception:
+                    pass
+
             for partition in psutil.disk_partitions():
+                dev = partition.device or ''
+                # Skip internal SD card partitions (mmcblk*) and the backup mount (already added)
+                if 'mmcblk' in dev:
+                    continue
+                if partition.mountpoint == mount_point:
+                    continue
+
                 if ('/media' in partition.mountpoint or
                     '/mnt' in partition.mountpoint or
                     partition.fstype in ['vfat', 'exfat', 'ntfs']):
@@ -55,7 +84,7 @@ class DataCollector:
                     try:
                         usage = psutil.disk_usage(partition.mountpoint)
                         devices.append({
-                            'name': os.path.basename(partition.device),
+                            'name': os.path.basename(dev) if dev else partition.mountpoint,
                             'mount': partition.mountpoint,
                             'total': usage.total / (1024**3),
                             'used': usage.used / (1024**3),
