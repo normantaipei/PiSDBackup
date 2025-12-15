@@ -4,6 +4,7 @@ import psutil
 import time
 import os
 import subprocess
+from smbus2 import SMBus
 
 class DataCollector:
     """Class responsible for collecting various system information"""
@@ -87,9 +88,7 @@ class DataCollector:
     def get_battery_info(self):
         """Gets battery information"""
         try:
-            # Get battery info only if available
-            # Typically works on Linux systems with ACPI available
-            # May not be available on Raspberry Pi without dedicated hardware
+            # Primary: psutil (works on systems with ACPI / standard battery support)
             battery = psutil.sensors_battery()
             if battery:
                 return {
@@ -97,9 +96,57 @@ class DataCollector:
                     'power_plugged': battery.power_plugged,
                     'secsleft': battery.secsleft,
                 }
+
+            # Fallback: try reading from sysfs (/sys/class/power_supply)
+            ps_path = '/sys/class/power_supply'
+            if os.path.isdir(ps_path):
+                for name in os.listdir(ps_path):
+                    p = os.path.join(ps_path, name)
+                    cap_file = os.path.join(p, 'capacity')
+                    status_file = os.path.join(p, 'status')
+                    if os.path.isfile(cap_file):
+                        try:
+                            with open(cap_file, 'r') as f:
+                                cap = f.read().strip()
+                            percent = int(cap)
+                        except:
+                            continue
+
+                        power_plugged = None
+                        if os.path.isfile(status_file):
+                            try:
+                                with open(status_file, 'r') as f:
+                                    st = f.read().strip().lower()
+                                power_plugged = (st in ('charging', 'full'))
+                            except:
+                                power_plugged = None
+
+                        return {
+                            'percent': percent,
+                            'power_plugged': power_plugged,
+                            'secsleft': None,
+                        }
+
+            # Fallback 2: attempt to read common I2C fuel gauge (MAX1704x) at 0x36
+            try:
+                with SMBus(1) as bus:
+                    addr = 0x36
+                    # Read SOC register (0x04) - SMBus word needs byte-swap
+                    raw = bus.read_word_data(addr, 0x04)
+                    swapped = ((raw & 0xFF) << 8) | (raw >> 8)
+                    percent = (swapped >> 8) & 0xFF
+                    frac = (swapped & 0xFF) / 256.0
+                    percent_float = percent + frac
+                    return {
+                        'percent': float(percent_float),
+                        'power_plugged': None,
+                        'secsleft': None,
+                    }
+            except Exception:
+                pass
+
             return {}
-        except Exception as e:
-            # print(f"Battery info error: {e}")
+        except Exception:
             return {}
 
     def update_data(self):

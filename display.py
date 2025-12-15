@@ -381,9 +381,7 @@ WantedBy=graphical-session.target
     def get_battery_info(self):
         """バッテリー情報を取得"""
         try:
-            # バッテリー情報が存在する場合のみ取得
-            # 一般的に、ACPIが利用可能なLinuxシステムで動作します
-            # Raspberry Piでは、専用のハードウェアがないと利用できない場合があります
+            # Primary: psutil
             battery = psutil.sensors_battery()
             if battery:
                 return {
@@ -391,9 +389,39 @@ WantedBy=graphical-session.target
                     'power_plugged': battery.power_plugged,
                     'secsleft': battery.secsleft,
                 }
+
+            # Fallback: read from sysfs (/sys/class/power_supply)
+            ps_path = '/sys/class/power_supply'
+            if os.path.isdir(ps_path):
+                for name in os.listdir(ps_path):
+                    p = os.path.join(ps_path, name)
+                    cap_file = os.path.join(p, 'capacity')
+                    status_file = os.path.join(p, 'status')
+                    if os.path.isfile(cap_file):
+                        try:
+                            with open(cap_file, 'r') as f:
+                                cap = f.read().strip()
+                            percent = int(cap)
+                        except:
+                            continue
+
+                        power_plugged = None
+                        if os.path.isfile(status_file):
+                            try:
+                                with open(status_file, 'r') as f:
+                                    st = f.read().strip().lower()
+                                power_plugged = (st in ('charging', 'full'))
+                            except:
+                                power_plugged = None
+
+                        return {
+                            'percent': percent,
+                            'power_plugged': power_plugged,
+                            'secsleft': None,
+                        }
+
             return {}
-        except Exception as e:
-            # print(f"バッテリー情報取得エラー: {e}")
+        except Exception:
             return {}
 
     def update_data(self):
