@@ -2,8 +2,11 @@
 
 * Token-based access (the QR code on the device carries the token).
 * Works fully offline: no external fonts/icons.
-* Thumbnails and previews are generated once and cached on the backup drive.
-* The file index is cached and rebuilt at most every ``file_list_cache_seconds``.
+* Thumbnails and previews are generated once and cached on the backup drive;
+  after each backup the missing thumbnails are generated in the background
+  (see ``thumbnail_cache``), and at most two images are decoded at a time.
+* The file index is cached and rebuilt at most every ``file_list_cache_seconds``;
+  the browser loads it page by page while scrolling instead of all at once.
 * Served with waitress (production WSGI server) when available.
 """
 
@@ -25,6 +28,7 @@ from typing import Dict, List, Optional
 from flask import Flask, abort, jsonify, make_response, redirect, render_template_string, request, send_file
 
 from config import Config, RAW_EXTENSIONS, load_config
+from thumbnail_cache import ThumbnailCache
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +80,7 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
   <h1><svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>PiSDBackup<span class="status" id="status"></span></h1>
   <button class="btn btn-secondary" onclick="loadFiles(true)"><svg viewBox="0 0 24 24"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>Refresh</button>
 </div>
-<div class="container"><div id="fileList"><div class="no-content">Loading…</div></div></div>
+<div class="container"><div id="fileList"><div class="no-content">Loading…</div></div><div id="sentinel" style="height:1px"></div></div>
 
 <div id="imageModal" class="modal">
   <div class="close" onclick="closeModal()">×</div>
@@ -94,45 +98,54 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
   const statusEl = document.getElementById('status');
   const modal = document.getElementById('imageModal');
   const preview = document.getElementById('imagePreview');
+  const sentinel = document.getElementById('sentinel');
   const q = (p) => encodeURIComponent(p);
+  let page = 0, pages = 1, loading = false, total = 0;
+  let lastMonth = null, lastDay = null, currentGrid = null;
 
   function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
 
   window.loadFiles = async function (refresh) {
+    page = 0; pages = 1; lastMonth = lastDay = currentGrid = null;
+    list.replaceChildren(el('div', 'no-content', 'Loading…'));
+    await loadNextPage(refresh);
+  };
+
+  async function loadNextPage(refresh) {
+    if (loading || page >= pages) return;
+    loading = true;
     try {
-      const r = await fetch('/api/files' + (refresh ? '?refresh=1' : ''), {cache: 'no-store'});
+      const r = await fetch('/api/files?page=' + (page + 1) + (refresh ? '&refresh=1' : ''), {cache: 'no-store'});
       if (r.status === 401) { location.reload(); return; }
       const data = await r.json();
       if (data.error) { list.replaceChildren(el('div', 'no-content', data.error)); return; }
-      render(data.grouped_files);
-      statusEl.textContent = data.count + ' photos';
-    } catch (e) { list.replaceChildren(el('div', 'no-content', 'Error loading files.')); console.error(e); }
-  };
-
-  function render(groups) {
-    const frag = document.createDocumentFragment();
-    if (!groups || !groups.length) { frag.appendChild(el('div', 'no-content', 'No photos on the backup drive yet.')); list.replaceChildren(frag); return; }
-    for (const m of groups) {
-      frag.appendChild(el('div', 'month-title', m.title_month));
-      for (const d of m.days) {
-        frag.appendChild(el('div', 'day-title', d.title_day));
-        const grid = el('div', 'file-grid');
-        for (const f of d.items) {
-          const item = el('div', 'file-item');
-          const img = document.createElement('img');
-          img.loading = 'lazy'; img.alt = f.name; img.src = '/api/thumbnail?path=' + q(f.path);
-          img.onerror = () => { img.style.display = 'none'; };
-          item.appendChild(img);
-          if (f.raw_path) item.appendChild(el('span', 'raw-badge', 'RAW'));
-          item.appendChild(el('div', 'name', f.name));
-          item.onclick = () => openPreview(f);
-          grid.appendChild(item);
-        }
-        frag.appendChild(grid);
-      }
-    }
-    list.replaceChildren(frag);
+      if (page === 0) list.replaceChildren();
+      page = data.page; pages = data.pages; total = data.total;
+      append(data.items);
+      statusEl.textContent = total + ' photos' + (page < pages ? ' · scroll for more' : '');
+      if (total === 0) list.replaceChildren(el('div', 'no-content', 'No photos on the backup drive yet.'));
+    } catch (e) { list.appendChild(el('div', 'no-content', 'Error loading files.')); console.error(e); }
+    finally { loading = false; }
   }
+
+  function append(items) {
+    for (const f of items) {
+      if (f.month_key !== lastMonth) { list.appendChild(el('div', 'month-title', f.title_month)); lastMonth = f.month_key; lastDay = null; }
+      if (f.day_key !== lastDay) { list.appendChild(el('div', 'day-title', f.title_day)); currentGrid = el('div', 'file-grid'); list.appendChild(currentGrid); lastDay = f.day_key; }
+      const item = el('div', 'file-item');
+      const img = document.createElement('img');
+      img.loading = 'lazy'; img.decoding = 'async'; img.alt = f.name; img.src = '/api/thumbnail?path=' + q(f.path);
+      img.onerror = () => { img.style.display = 'none'; };
+      item.appendChild(img);
+      if (f.raw_path) item.appendChild(el('span', 'raw-badge', 'RAW'));
+      item.appendChild(el('div', 'name', f.name));
+      item.onclick = () => openPreview(f);
+      currentGrid.appendChild(item);
+    }
+  }
+
+  // Load the next page when the sentinel at the bottom scrolls into view.
+  new IntersectionObserver((entries) => { if (entries.some(e => e.isIntersecting)) loadNextPage(false); }, {rootMargin: '600px'}).observe(sentinel);
 
   function openPreview(f) {
     preview.src = '/api/preview?path=' + q(f.path);
@@ -171,28 +184,37 @@ def format_size(n: float) -> str:
 
 
 class FileIndex:
-    """Cached, recursive listing of displayable images on the backup drive."""
+    """Cached, recursive listing of displayable images on the backup drive (newest first)."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self._lock = threading.Lock()
         self._built_at = 0.0
-        self._data: Optional[dict] = None
+        self._items: Optional[List[dict]] = None
 
     def invalidate(self) -> None:
         with self._lock:
             self._built_at = 0.0
 
-    def get(self, force: bool = False) -> dict:
+    def items(self, force: bool = False) -> List[dict]:
         with self._lock:
-            fresh = self._data is not None and (time.monotonic() - self._built_at) < self.cfg.file_list_cache_seconds
-            if fresh and not force:
-                return self._data
-            self._data = self._build()
-            self._built_at = time.monotonic()
-            return self._data
+            fresh = self._items is not None and (time.monotonic() - self._built_at) < self.cfg.file_list_cache_seconds
+            if not fresh or force:
+                self._items = self._build()
+                self._built_at = time.monotonic()
+            return self._items
 
-    def _build(self) -> dict:
+    def page(self, number: int, force: bool = False) -> dict:
+        items = self.items(force)
+        size = max(1, self.cfg.page_size)
+        pages = max(1, (len(items) + size - 1) // size)
+        number = min(max(1, number), pages)
+        chunk = items[(number - 1) * size: number * size]
+        return {"items": chunk, "page": number, "pages": pages, "total": len(items), "has_more": number < pages,
+                # kept for older clients
+                "grouped_files": group(chunk), "count": len(items)}
+
+    def _build(self) -> List[dict]:
         base = Path(self.cfg.backup_dir)
         raw_exts = set(RAW_EXTENSIONS)
         items: List[dict] = []
@@ -216,30 +238,33 @@ class FileIndex:
                         pass
                 stem = os.path.splitext(name)[0].lower()
                 raw_name = next((names_lower[stem + e] for e in raw_exts if stem + e in names_lower), None)
-                rel = full.relative_to(base).as_posix()
                 items.append({
                     "name": name,
-                    "path": rel,
+                    "path": full.relative_to(base).as_posix(),
                     "size": format_size(st.st_size),
                     "modified": dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "_dt": dt,
+                    "month_key": dt.strftime("%Y-%m"),
+                    "day_key": dt.strftime("%Y-%m-%d"),
+                    "title_month": dt.strftime("%B %Y"),
+                    "title_day": dt.strftime("%A, %B %d, %Y"),
                     "raw_path": (Path(dirpath) / raw_name).relative_to(base).as_posix() if raw_name else None,
                 })
-        items.sort(key=lambda x: (x["_dt"], x["name"]), reverse=True)
+        items.sort(key=lambda x: (x["modified"], x["name"]), reverse=True)
+        return items
 
-        months: Dict[str, dict] = {}
-        for it in items:
-            dt = it.pop("_dt")
-            mk, dk = dt.strftime("%Y-%m"), dt.strftime("%Y-%m-%d")
-            month = months.setdefault(mk, {"title_month": dt.strftime("%B %Y"), "days": {}})
-            day = month["days"].setdefault(dk, {"title_day": dt.strftime("%A, %B %d, %Y"), "items": []})
-            day["items"].append(it)
-        grouped = []
-        for mk in sorted(months, reverse=True):
-            m = months[mk]
-            m["days"] = [m["days"][dk] for dk in sorted(m["days"], reverse=True)]
-            grouped.append(m)
-        return {"grouped_files": grouped, "count": len(items)}
+
+def group(items: List[dict]) -> List[dict]:
+    months: Dict[str, dict] = {}
+    for it in items:
+        month = months.setdefault(it["month_key"], {"title_month": it["title_month"], "days": {}})
+        day = month["days"].setdefault(it["day_key"], {"title_day": it["title_day"], "items": []})
+        day["items"].append(it)
+    out = []
+    for mk in sorted(months, reverse=True):
+        m = months[mk]
+        m["days"] = [m["days"][dk] for dk in sorted(m["days"], reverse=True)]
+        out.append(m)
+    return out
 
 
 def _resolve_in_base(cfg: Config, relative: str) -> Path:
@@ -257,51 +282,6 @@ def _resolve_in_base(cfg: Config, relative: str) -> Path:
     return full
 
 
-def _scaled_image(cfg: Config, full: Path, max_px: int, kind: str) -> Optional[Path]:
-    """Returns a cached, EXIF-rotated JPEG of ``full`` limited to ``max_px`` (generating it if needed)."""
-    try:
-        st = full.stat()
-    except OSError:
-        return None
-    key = hashlib.sha1(f"{full}|{st.st_size}|{st.st_mtime_ns}|{max_px}".encode()).hexdigest()
-    cache_dir = cfg.state_dir / "cache" / kind
-    cached = cache_dir / f"{key}.jpg"
-    if cached.is_file():
-        return cached
-    try:
-        from PIL import Image, ImageOps
-        with Image.open(full) as img:
-            img.draft("RGB", (max_px, max_px))  # fast JPEG downscale on decode
-            img = ImageOps.exif_transpose(img)
-            img.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
-            if img.mode not in ("RGB", "L"):
-                img = img.convert("RGB")
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            tmp = cached.with_suffix(".tmp")
-            img.save(tmp, "JPEG", quality=82, optimize=True)
-            os.replace(tmp, cached)
-        return cached
-    except OSError as e:
-        # Backup drive may be read-only or full: serve from memory instead of caching.
-        log.debug("Could not cache %s image for %s: %s", kind, full, e)
-        try:
-            from PIL import Image, ImageOps
-            with Image.open(full) as img:
-                img.draft("RGB", (max_px, max_px))
-                img = ImageOps.exif_transpose(img)
-                img.thumbnail((max_px, max_px))
-                buf = BytesIO()
-                img.convert("RGB").save(buf, "JPEG", quality=82)
-            buf.seek(0)
-            return buf  # type: ignore[return-value]
-        except Exception as e2:
-            log.warning("Failed to render %s for %s: %s", kind, full, e2)
-            return None
-    except Exception as e:
-        log.warning("Failed to render %s for %s: %s", kind, full, e)
-        return None
-
-
 # --------------------------------------------------------------------------- app
 def create_app(cfg: Optional[Config] = None, copy_manager=None) -> Flask:
     cfg = cfg or load_config()
@@ -310,6 +290,8 @@ def create_app(cfg: Optional[Config] = None, copy_manager=None) -> Flask:
     app.config["COPY_MANAGER"] = copy_manager
     index = FileIndex(cfg)
     app.config["FILE_INDEX"] = index
+    cache = ThumbnailCache(cfg, max_concurrent=cfg.max_concurrent_decodes)
+    app.config["THUMBNAIL_CACHE"] = cache
     token = cfg.ensure_token() if cfg.web_auth else ""
 
     @app.before_request
@@ -343,26 +325,32 @@ def create_app(cfg: Optional[Config] = None, copy_manager=None) -> Flask:
     def api_files():
         if not Path(cfg.backup_dir).is_dir():
             return jsonify({"error": "Backup drive is not connected."}), 503
-        return jsonify(index.get(force=request.args.get("refresh") == "1"))
+        try:
+            page = int(request.args.get("page", 1))
+        except ValueError:
+            page = 1
+        return jsonify(index.page(page, force=request.args.get("refresh") == "1"))
 
     @app.route("/api/status")
     def api_status():
         mgr = app.config.get("COPY_MANAGER")
-        return jsonify(mgr.get_status() if mgr else {"available": False})
+        status = mgr.get_status() if mgr else {"available": False}
+        status["thumbnail_warm"] = {"running": cache.is_warming(), **cache.last_warm_stats}
+        return jsonify(status)
 
     @app.route("/api/thumbnail")
     def api_thumbnail():
-        return _serve_scaled(cfg.thumbnail_size, "thumbs")
+        return _serve_scaled("thumbs")
 
     @app.route("/api/preview")
     def api_preview():
-        return _serve_scaled(cfg.preview_size, "previews")
+        return _serve_scaled("previews")
 
-    def _serve_scaled(max_px: int, kind: str):
+    def _serve_scaled(kind: str):
         full = _resolve_in_base(cfg, request.args.get("path", ""))
         if not full.is_file():
             abort(404)
-        result = _scaled_image(cfg, full, max_px, kind)
+        result = cache.get(full, kind)
         if result is None:
             abort(404)
         if isinstance(result, Path):

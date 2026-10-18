@@ -60,7 +60,7 @@ def test_thumbnail_is_cached_and_small(env):
     c = app.test_client(); c.get("/?token=testtoken")
     r = c.get("/api/thumbnail?path=2024-05-01/DSC001.JPG")
     assert r.status_code == 200 and r.mimetype == "image/jpeg"
-    cached = list((backup / ".pisdbackup" / "cache" / "thumbs").glob("*.jpg"))
+    cached = list((backup / ".pisdbackup" / "cache" / "thumbs").rglob("*.jpg"))
     assert len(cached) == 1
     with Image.open(cached[0]) as im:
         assert max(im.size) <= cfg.thumbnail_size

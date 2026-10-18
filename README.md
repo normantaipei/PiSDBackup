@@ -67,7 +67,7 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
 cp config.example.json config.json   # optional; env vars like PISD_BACKUP_DIR also work
 python main.py
-pytest                                # 24 tests, no hardware needed
+pytest                                # 29 tests, no hardware needed
 PISD_ALLOW_DUMMY_DISPLAY=1 python main.py   # headless smoke run
 ```
 
@@ -85,6 +85,10 @@ PISD_ALLOW_DUMMY_DISPLAY=1 python main.py   # headless smoke run
 | `web_auth` / `web_token` | `true` / auto | Access code for the browser (shown on screen and in the QR code) |
 | `web_port` | `5000` | Browser port |
 | `thumbnail_size` / `preview_size` | `320` / `1600` | Cached image sizes |
+| `page_size` | `200` | Photos per page; older pages load while scrolling |
+| `warm_thumbnails` | `true` | Pre-generate thumbnails in the background after each backup and at startup |
+| `max_concurrent_decodes` | `2` | Images decoded at once (protects CPU/RAM on large libraries) |
+| `preview_cache_max_mib` | `1024` | LRU cap for the full-size preview cache (`0` = unlimited) |
 | `wifi_interface` | `wlan0` | Interface used for scanning/connecting |
 | `debug_mode` | `false` | Shows Refresh/Restart buttons; ESC quits |
 
@@ -95,5 +99,6 @@ PISD_ALLOW_DUMMY_DISPLAY=1 python main.py   # headless smoke run
 * **重複判斷**：先比 size + mtime（FAT 容許 2 秒誤差），相同即跳過；只有大小相同但時間不同時才算 hash。檔名相同但內容不同會以 `_1`、`_2` 後綴保留兩份。
 * **裝置識別**：以檔案系統 UUID 追蹤「已處理」的卡，換卡即使掛載路徑相同也會重新備份；拔卡後狀態清除。
 * **取消**：按 Stop 會真正停止，且不會自動重跑；重新插卡才會續傳（已複製的檔案會被快速跳過）。
+* **大量照片**（Issue #1）：網頁改為分頁載入（捲動到底再抓下一頁），縮圖在每次備份完成後於背景批次預產並存在 `.pisdbackup/cache/`，同時解碼數量有上限，已刪除照片的快取會自動清除，預覽圖快取有大小上限。
 * **安全**：網頁需存取碼；路徑穿越與 `.pisdbackup` 內部目錄被擋下；以 waitress 取代 Flask 開發伺服器；服務不以 root 執行。
 * **設定集中**：所有路徑、埠號、介面名稱都在 `config.json`，不再散落在各檔案。

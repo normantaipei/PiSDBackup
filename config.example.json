@@ -12,6 +12,10 @@
   "web_token": "",
   "thumbnail_size": 320,
   "preview_size": 1600,
+  "page_size": 200,
+  "preview_cache_max_mib": 1024,
+  "warm_thumbnails": true,
+  "max_concurrent_decodes": 2,
 
   "wifi_interface": "wlan0",
   "debug_mode": false,

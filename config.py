@@ -78,6 +78,14 @@ class Config:
     thumbnail_size: int = 320
     preview_size: int = 1600
     file_list_cache_seconds: int = 30
+    # Photos per page in the browser (older pages load as you scroll).
+    page_size: int = 200
+    # Full-size previews are generated on demand; keep their cache under this size.
+    preview_cache_max_mib: int = 1024
+    # Pre-generate thumbnails in the background after each backup and at startup.
+    warm_thumbnails: bool = True
+    # How many images may be decoded simultaneously (each 24 MP decode costs a core + tens of MB).
+    max_concurrent_decodes: int = 2
 
     # Networking
     wifi_interface: str = "wlan0"
