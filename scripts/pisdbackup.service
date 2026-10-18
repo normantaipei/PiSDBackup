@@ -1,0 +1,20 @@
+# Installed by scripts/install.sh with __USER__ and __APP_DIR__ substituted.
+[Unit]
+Description=PiSDBackup - touch UI, web browser and automatic SD card backup
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+# Needed for KMS/DRM output and input devices when no desktop session is running.
+SupplementaryGroups=video render input
+WorkingDirectory=__APP_DIR__
+Environment=PYTHONUNBUFFERED=1
+Environment=PISD_CONFIG=/etc/pisdbackup/config.json
+ExecStart=__APP_DIR__/.venv/bin/python __APP_DIR__/main.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

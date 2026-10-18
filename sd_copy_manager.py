@@ -1,453 +1,549 @@
-import os
-import shutil
+"""Automatic, verified copying of media from removable cards to the backup drive.
+
+Design goals (see README "設計說明"):
+
+* the source card is **never written to** (detection is read-only);
+* every file is copied to a temporary ``.part`` file, fsync'ed, optionally
+  re-read and hash-verified, then atomically renamed into place, so a power
+  loss can never leave a half-written file that looks like a photo;
+* duplicates are detected cheaply (size + mtime) and only hashed when needed;
+* devices are tracked by filesystem UUID, not mount path;
+* cancelling really stops and does not auto-restart until the card is
+  re-inserted;
+* a per-session JSON-lines log with every error is written to the backup drive.
+"""
+
+from __future__ import annotations
+
 import hashlib
-import time
-from datetime import datetime
-import threading
 import json
-import psutil # Used for checking mount points
+import logging
+import os
+import threading
+import time
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+import devices as devmod
+from config import Config
+from media_dates import get_capture_date_folder
+
+log = logging.getLogger(__name__)
+
+CHUNK_SIZE = 1024 * 1024
+MTIME_TOLERANCE = 2.0  # FAT timestamps have 2-second resolution
+
+
+@dataclass
+class CopyStatus:
+    is_copying: bool = False
+    current_file: str = ""
+    progress_percent: float = 0.0
+    total_files: int = 0
+    copied_files: int = 0
+    skipped_files: int = 0
+    error_files: int = 0
+    bytes_total: int = 0
+    bytes_done: int = 0
+    status_message: str = "Starting..."
+    ssd_present: bool = False
+    active_source: Optional[str] = None
+    last_result: Optional[str] = None
+    errors: List[str] = field(default_factory=list)
+
+    # Compatibility alias used by older UI code.
+    @property
+    def active_usb_source(self):
+        return self.active_source
+
+
+class CopyCancelled(Exception):
+    pass
+
+
+class BackupDriveLost(Exception):
+    pass
+
 
 class SDCopyManager:
-    """
-    Manages the file copying process from external USB storage devices to an SSD.
-    Detects USB device insertion, copies files to the SSD based on creation date,
-    and handles file duplicates and naming conflicts.
-    """
-    # Update the SSD mount point to your actual path
-    def __init__(self, ssd_mount_point="/mnt/backup_drive"):
-        self.ssd_mount_point = ssd_mount_point
-        self.active_usb_source_mount_point = None # Current USB source mount point being copied from
-        self.is_copying = False
-        self.current_file = ""
-        self.progress_percent = 0.0
-        self.total_files = 0
-        self.copied_files = 0
-        self.skipped_files = 0
-        self.error_files = 0
-        self.status_message = "Waiting for external USB device or SSD..."
-        self.copy_thread = None
-        self.event_callback = None # Callback function for UI updates
-        self._last_ssd_status = None # Tracks the last detected status of the SSD (True/False)
-        self._processed_usb_devices = set() # Tracks USB devices that have been processed/copied
+    def __init__(self, config: Optional[Config] = None,
+                 device_lister: Callable[[], List[devmod.BlockDevice]] = devmod.list_mounted_devices):
+        self.config = config or Config()
+        self.backup_dir = self.config.backup_dir
+        self._device_lister = device_lister
 
-        # Ensure the SSD mount point directory exists
-        # This will create it if it doesn't exist, but it won't mount the drive.
-        os.makedirs(self.ssd_mount_point, exist_ok=True)
-        print(f"SDCopyManager initialized. SSD: {self.ssd_mount_point}")
-        self._update_ui() # Update UI on initialization
+        self._lock = threading.RLock()
+        self._status = CopyStatus()
+        self._cancel = threading.Event()
+        self._copy_thread: Optional[threading.Thread] = None
+        self._callbacks: List[Callable[[dict], None]] = []
 
-    def set_event_callback(self, callback):
-        """Sets a callback function for sending updates to the UI during copying."""
-        self.event_callback = callback
-        self._update_ui() # Send initial status immediately after setting callback
+        # device_id -> "done" | "cancelled" | "failed"; cleared when the device disappears
+        self._processed: Dict[str, str] = {}
+        self._known_device_ids: set = set()
+        self._last_ssd_check = 0.0
+        self._last_ssd_state = False
+        self._session_log = None
 
-    def _update_ui(self):
-        """Invokes the callback function to update the UI"""
-        if self.event_callback:
-            status_data = {
-                'is_copying': self.is_copying,
-                'current_file': self.current_file,
-                'progress_percent': self.progress_percent,
-                'total_files': self.total_files,
-                'copied_files': self.copied_files,
-                'skipped_files': self.skipped_files,
-                'error_files': self.error_files,
-                'status_message': self.status_message,
-                'ssd_present': self.check_ssd_present(verbose=False),
-                'active_usb_source': self.active_usb_source_mount_point
-            }
-            self.event_callback(status_data)
-        
-    def _get_file_hash(self, filepath):
-        """Calculates the SHA256 hash of a file."""
+        log.info("SDCopyManager initialised. Backup drive: %s", self.backup_dir)
+
+    # ------------------------------------------------------------------ status
+    def set_event_callback(self, callback: Callable[[dict], None]) -> None:
+        """Registers a status listener (several may be registered)."""
+        with self._lock:
+            if callback not in self._callbacks:
+                self._callbacks.append(callback)
+        self._emit()
+
+    add_event_callback = set_event_callback
+
+    def get_status(self) -> dict:
+        with self._lock:
+            d = asdict(self._status)
+        d["active_usb_source"] = d["active_source"]
+        return d
+
+    @property
+    def is_copying(self) -> bool:
+        return self._status.is_copying
+
+    @property
+    def status_message(self) -> str:
+        return self._status.status_message
+
+    def _set(self, **fields) -> None:
+        with self._lock:
+            for k, v in fields.items():
+                setattr(self._status, k, v)
+
+    def _emit(self) -> None:
+        with self._lock:
+            callbacks = list(self._callbacks)
+        if not callbacks:
+            return
+        status = self.get_status()
+        for cb in callbacks:
+            try:
+                cb(status)
+            except Exception:  # UI errors must never kill the copy thread
+                log.exception("Status callback failed")
+
+    # ---------------------------------------------------------- backup drive
+    def check_ssd_present(self, force: bool = False) -> bool:
+        """Cheap check (no writes): is the backup directory a mounted, writable filesystem?"""
+        now = time.monotonic()
+        if not force and now - self._last_ssd_check < 1.0:
+            return self._last_ssd_state
+        present = False
+        try:
+            dev = devmod.find_backup_device(self.backup_dir, self._device_lister())
+            present = (dev is not None and not dev.read_only
+                       and os.path.isdir(self.backup_dir)
+                       and os.access(self.backup_dir, os.W_OK | os.X_OK))
+        except OSError as e:
+            log.debug("Backup drive check failed: %s", e)
+            present = False
+        if present != self._last_ssd_state:
+            log.info("Backup drive %s", "available" if present else "not available")
+        self._last_ssd_state = present
+        self._last_ssd_check = now
+        self._set(ssd_present=present)
+        return present
+
+    def _write_test(self) -> bool:
+        """One real write test per copy session (not per file)."""
+        probe = Path(self.backup_dir) / f".write_test_{os.getpid()}"
+        try:
+            probe.write_text("ok")
+            probe.unlink()
+            return True
+        except OSError as e:
+            log.error("Backup drive is not writable: %s", e)
+            return False
+
+    def _free_bytes(self) -> int:
+        try:
+            st = os.statvfs(self.backup_dir)
+            return st.f_bavail * st.f_frsize
+        except OSError:
+            return 0
+
+    # --------------------------------------------------------------- sources
+    def get_available_sources(self) -> List[devmod.BlockDevice]:
+        try:
+            return devmod.find_source_devices(self.backup_dir, self.config.source_mount_prefixes, self._device_lister())
+        except Exception:
+            log.exception("Device scan failed")
+            return []
+
+    def _unprocessed(self, sources: List[devmod.BlockDevice]) -> List[devmod.BlockDevice]:
+        return [s for s in sources if s.device_id not in self._processed]
+
+    # ------------------------------------------------------------ public API
+    def start_copy(self, source: Optional[devmod.BlockDevice] = None) -> bool:
+        with self._lock:
+            if self._status.is_copying:
+                log.info("Copy already running")
+                return False
+            if source is None:
+                candidates = self._unprocessed(self.get_available_sources())
+                if not candidates:
+                    self._set(status_message="No new card to copy.")
+                    self._emit()
+                    return False
+                source = candidates[0]
+            self._cancel.clear()
+            self._set(is_copying=True, active_source=source.display_name, status_message=f"Preparing {source.display_name}...",
+                      current_file="", progress_percent=0.0, total_files=0, copied_files=0, skipped_files=0,
+                      error_files=0, bytes_total=0, bytes_done=0, errors=[], last_result=None)
+            self._copy_thread = threading.Thread(target=self._run_session, args=(source,), name="sd-copy", daemon=True)
+            self._copy_thread.start()
+        self._emit()
+        return True
+
+    def stop_copy(self) -> None:
+        if self._status.is_copying:
+            log.info("Copy cancellation requested")
+            self._cancel.set()
+            self._set(status_message="Cancelling...")
+            self._emit()
+
+    def forget_device(self, device_id: str) -> None:
+        """Allows a processed/cancelled device to be copied again without re-inserting."""
+        with self._lock:
+            self._processed.pop(device_id, None)
+
+    # ------------------------------------------------------------- the loop
+    def main_loop(self, stop_event: Optional[threading.Event] = None) -> None:
+        stop_event = stop_event or threading.Event()
+        while not stop_event.is_set():
+            try:
+                self._tick()
+            except Exception:
+                log.exception("Error in device poll loop")
+            stop_event.wait(self.config.poll_interval)
+
+    def _tick(self) -> None:
+        sources = self.get_available_sources()
+        current_ids = {s.device_id for s in sources}
+        ssd_ok = self.check_ssd_present()
+
+        # Forget devices that were removed so re-insertion triggers a new copy.
+        for gone in self._known_device_ids - current_ids:
+            if gone in self._processed:
+                log.info("Card %s removed; it will be copied again when re-inserted", gone)
+            self._processed.pop(gone, None)
+        self._known_device_ids = current_ids
+
+        if self._status.is_copying:
+            return
+
+        pending = self._unprocessed(sources)
+        if not ssd_ok:
+            self._set(status_message="Please insert the backup SSD.")
+        elif not sources:
+            self._set(status_message="Waiting for an SD card...")
+        elif pending:
+            self.start_copy(pending[0])
+            return
+        else:
+            names = ", ".join(s.display_name for s in sources)
+            last = self._status.last_result
+            self._set(status_message=f"{names}: {last}" if last else f"{names} already backed up. Safe to remove.")
+        self._emit()
+
+    # ------------------------------------------------------------ a session
+    def _run_session(self, source: devmod.BlockDevice) -> None:
+        result = "failed"
+        started = datetime.now()
+        try:
+            if not self.check_ssd_present(force=True) or not self._write_test():
+                raise BackupDriveLost("Backup drive not present or not writable")
+            self._open_session_log(source, started)
+            files = self._collect_files(source.mountpoint)
+            if not files:
+                self._set(status_message=f"No media files on {source.display_name}.", progress_percent=100.0, last_result="no media files")
+                result = "done"
+                return
+
+            total_bytes = sum(size for _, size in files)
+            self._set(total_files=len(files), bytes_total=total_bytes, status_message="Checking free space...")
+            self._emit()
+            self._check_free_space(files)
+
+            self._set(status_message="Copying...")
+            self._emit()
+            last_emit = 0.0
+            for index, (src, size) in enumerate(files):
+                if self._cancel.is_set():
+                    raise CopyCancelled()
+                if index % 20 == 0 and not self.check_ssd_present():
+                    raise BackupDriveLost("Backup drive disconnected during copy")
+                self._set(current_file=os.path.basename(src))
+                self._copy_one(src, size)
+                st = self._status
+                self._set(progress_percent=(index + 1) / len(files) * 100.0)
+                if time.monotonic() - last_emit > 0.2:
+                    self._emit()
+                    last_emit = time.monotonic()
+
+            st = self._status
+            summary = f"Copied {st.copied_files}, skipped {st.skipped_files}, errors {st.error_files}"
+            result = "done" if st.error_files == 0 else "done_with_errors"
+            self._set(status_message=("Backup complete. " if st.error_files == 0 else "Backup finished WITH ERRORS. ") + summary,
+                      progress_percent=100.0, current_file="", last_result=summary)
+        except CopyCancelled:
+            result = "cancelled"
+            st = self._status
+            self._set(status_message=f"Cancelled. Copied {st.copied_files} of {st.total_files}. Re-insert the card to resume.",
+                      last_result="cancelled (re-insert the card to resume)")
+        except BackupDriveLost as e:
+            result = "failed"
+            self._set(status_message=f"{e}. Copy aborted.", last_result="aborted: backup drive lost")
+        except Exception as e:
+            log.exception("Copy session failed")
+            result = "failed"
+            self._set(status_message=f"Copy failed: {e}", last_result=f"failed: {e}")
+        finally:
+            with self._lock:
+                self._processed[source.device_id] = result
+                self._status.is_copying = False
+                self._status.active_source = None
+            self._close_session_log(result)
+            self._emit()
+            log.info("Session for %s finished: %s", source.display_name, result)
+
+    def _collect_files(self, root: str) -> List[tuple]:
+        exts = self.config.media_extension_set()
+        files = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d.lower() not in ("$recycle.bin", "system volume information")]
+            for name in filenames:
+                if name.startswith(".") or name.startswith("._"):
+                    continue
+                if exts and os.path.splitext(name)[1].lower() not in exts:
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    size = os.stat(path).st_size
+                except OSError as e:
+                    self._record_error(path, f"stat failed: {e}")
+                    continue
+                files.append((path, size))
+            if self._cancel.is_set():
+                raise CopyCancelled()
+        files.sort()
+        return files
+
+    def _check_free_space(self, files: List[tuple]) -> None:
+        # Estimate what is actually new: files whose name+size already exist are free.
+        needed = 0
+        for src, size in files:
+            dest = Path(self.backup_dir) / self._dest_folder(src) / os.path.basename(src)
+            try:
+                if dest.is_file() and dest.stat().st_size == size:
+                    continue
+            except OSError:
+                pass
+            needed += size
+        reserve = self.config.min_free_mib * 1024 * 1024
+        free = self._free_bytes()
+        if needed + reserve > free:
+            raise RuntimeError(f"Not enough space: need {needed / 1e9:.1f} GB, free {free / 1e9:.1f} GB")
+
+    def _dest_folder(self, src: str) -> str:
+        try:
+            return get_capture_date_folder(src)
+        except OSError:
+            return "unknown-date"
+
+    # -------------------------------------------------------------- one file
+    def _copy_one(self, src: str, size: int) -> None:
+        name = os.path.basename(src)
+        dest_dir = Path(self.backup_dir) / self._dest_folder(src)
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            self._cleanup_partials(dest_dir)
+            dest = dest_dir / name
+            if dest.exists():
+                outcome = self._compare_existing(src, dest, size)
+                if outcome == "same":
+                    self._bump("skipped_files", bytes_done=size)
+                    self._log_event("skip", src, str(dest))
+                    return
+                dest = self._unique_name(dest_dir, name)
+            self._atomic_copy(src, dest, size)
+            self._bump("copied_files")
+            self._log_event("copy", src, str(dest))
+        except CopyCancelled:
+            raise
+        except OSError as e:
+            if not self.check_ssd_present(force=True):
+                raise BackupDriveLost("Backup drive disconnected during copy") from e
+            self._record_error(src, str(e))
+        except Exception as e:
+            self._record_error(src, f"{type(e).__name__}: {e}")
+
+    def _compare_existing(self, src: str, dest: Path, size: int) -> str:
+        try:
+            s_st, d_st = os.stat(src), dest.stat()
+        except OSError:
+            return "different"
+        if s_st.st_size != d_st.st_size:
+            return "different"
+        if abs(s_st.st_mtime - d_st.st_mtime) <= MTIME_TOLERANCE:
+            return "same"
+        # Same size, different timestamp: hash both to be sure.
+        return "same" if self._hash_file(src) == self._hash_file(dest) else "different"
+
+    @staticmethod
+    def _unique_name(dest_dir: Path, name: str) -> Path:
+        base, ext = os.path.splitext(name)
+        n = 1
+        while True:
+            candidate = dest_dir / f"{base}_{n}{ext}"
+            if not candidate.exists():
+                return candidate
+            n += 1
+
+    def _atomic_copy(self, src: str, dest: Path, size: int) -> None:
+        tmp = dest.with_name(f".{dest.name}.part")
         hasher = hashlib.sha256()
         try:
-            with open(filepath, 'rb') as f:
+            with open(src, "rb") as fin, open(tmp, "wb") as fout:
                 while True:
-                    chunk = f.read(4096)
+                    if self._cancel.is_set():
+                        raise CopyCancelled()
+                    chunk = fin.read(CHUNK_SIZE)
                     if not chunk:
                         break
                     hasher.update(chunk)
-            return hasher.hexdigest()
-        except Exception as e:
-            print(f"Error calculating hash for {filepath}: {e}")
-            return None
-
-    def _get_file_creation_date(self, filepath):
-        """Attempts to get the file's creation date (or modification date as fallback)."""
-        try:
-            timestamp = os.stat(filepath).st_birthtime
-        except AttributeError:
-            # Fallback to modification time if creation time is not available (e.g., on some Linux file systems)
-            timestamp = os.stat(filepath).st_mtime
-        return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
-
-    def _copy_file(self, src_file_path, dest_dir):
-        """
-        Copies a single file, handling naming conflicts and content duplication.
-        """
-        filename = os.path.basename(src_file_path)
-        dest_file_path = os.path.join(dest_dir, filename)
-        
-        os.makedirs(dest_dir, exist_ok=True) # Ensure the destination directory exists
-
-        if os.path.exists(dest_file_path):
-            src_hash = self._get_file_hash(src_file_path)
-            dest_hash = self._get_file_hash(dest_file_path)
-
-            if src_hash == dest_hash:
-                print(f"Skipping identical file: {filename}")
-                self.skipped_files += 1
-                return
-            else:
-                base, ext = os.path.splitext(filename)
-                count = 1
-                new_dest_file_path = dest_file_path
-                while os.path.exists(new_dest_file_path):
-                    new_filename = f"{base}_{count}{ext}"
-                    new_dest_file_path = os.path.join(dest_dir, new_filename)
-                    count += 1
-                dest_file_path = new_dest_file_path
-                print(f"Renaming and copying different file: {filename} to {os.path.basename(dest_file_path)}")
-        try:
-            shutil.copy2(src_file_path, dest_file_path)
-            print(f"Copied: {src_file_path} to {dest_file_path}")
-            self.copied_files += 1
-        except Exception as e:
-            print(f"Error copying {src_file_path} to {dest_file_path}: {e}")
-            self.error_files += 1
-    
-    def get_available_usb_source_devices(self):
-        """
-        Detects all external USB storage device mount points that are not the SSD.
-        It excludes system partitions and the known SSD mount point.
-        """
-        usb_devices = []
-        # Define common system mount point prefixes that we don't want to copy from
-        system_mount_point_prefixes = ['/', '/boot', '/etc', '/dev', '/proc', '/sys', '/run', '/tmp', '/var']
-
-        print("\nDEBUG (get_available_usb_source_devices): Starting scan for all disk partitions...")
-        for partition in psutil.disk_partitions():
-            mountpoint = partition.mountpoint
-            device_name = partition.device
-            fstype = partition.fstype
-
-            print(f"DEBUG: Checking partition: Device={device_name}, Mountpoint={mountpoint}, FileSystem={fstype}")
-
-            # 1. Exclude system mount points
-            is_system_mount = False
-            for prefix in system_mount_point_prefixes:
-                if mountpoint == prefix or mountpoint.startswith(prefix + os.sep):
-                    is_system_mount = True
-                    break
-            if is_system_mount and mountpoint != self.ssd_mount_point:
-                print(f"DEBUG: Skipping (system mount point or subdirectory): {mountpoint}")
-                continue
-
-            # 2. Exclude the SSD mount point itself
-            if mountpoint == self.ssd_mount_point:
-                print(f"DEBUG: Skipping (this is the target SSD): {mountpoint}")
-                continue
-
-            # 3. Broader check: any non-system, non-SSD mount point is a candidate.
-            # We will verify writability to confirm it's a valid source.
-            print(f"DEBUG: Candidate external device found: {mountpoint} ({device_name})")
-            if os.access(mountpoint, os.R_OK) and os.access(mountpoint, os.W_OK):
-                test_file = os.path.join(mountpoint, f".write_test_{os.getpid()}")
-                try:
-                    with open(test_file, 'w') as f:
-                        f.write("test")
-                    os.remove(test_file)
-                    usb_devices.append(mountpoint)
-                    print(f"Detected external USB source device: {mountpoint} ({device_name}) - writable")
-                except (IOError, OSError) as e:
-                    print(f"Warning: Candidate device {mountpoint} is not writable (read-only or permission error): {e}")
-                except Exception as e:
-                    print(f"Warning: An unexpected error occurred during write test for {mountpoint}: {e}")
-        
-        print(f"DEBUG (get_available_usb_source_devices): Scan finished. Found USB devices: {usb_devices}")
-        return usb_devices
-
-
-    def check_ssd_present(self, verbose=True):
-        """
-        Checks if the SSD is mounted and writable.
-        Uses psutil to verify the SSD mount point is a valid filesystem mount point,
-        and attempts to create a temporary file inside it to check write permissions.
-        The verbose parameter controls whether detailed DEBUG messages are printed on each check.
-        """
-        current_status = False
-        
-        # 1. First, check if the mount point path exists
-        if not os.path.exists(self.ssd_mount_point):
-            if verbose or self._last_ssd_status is not False:
-                print(f"ERROR: SSD mount point path does not exist: '{self.ssd_mount_point}'")
-            self._last_ssd_status = False
-            return False
-
-        # 2. Then use psutil to check if it's actually a mount point
-        is_mounted = False
-        for partition in psutil.disk_partitions():
-            if partition.mountpoint == self.ssd_mount_point:
-                is_mounted = True
-                break
-        
-        if not is_mounted:
-            if verbose or self._last_ssd_status is not False:
-                print(f"ERROR: psutil does not identify '{self.ssd_mount_point}' as a valid mount point.")
-                print("List of detected mount points (for reference):")
-                if verbose:
-                    for p in psutil.disk_partitions():
-                        print(f"   Device: {p.device}, Mountpoint: {p.mountpoint}, FileSystem: {p.fstype}")
-            self._last_ssd_status = False
-            return False
-
-        # 3. Finally, test write permissions
-        test_file = os.path.join(self.ssd_mount_point, ".write_test_temp")
-        try:
-            # Ensure the parent directory (SSD mount point) exists and is accessible for creating the test file
-            # This is already handled by os.makedirs in __init__, but added here for robustness
-            os.makedirs(os.path.dirname(test_file), exist_ok=True) 
-            with open(test_file, 'w') as f:
-                f.write("test")
-            os.remove(test_file)
-            current_status = True
-            if verbose or self._last_ssd_status is not True:
-                print(f"SSD detected and writable: '{self.ssd_mount_point}'")
-        except FileNotFoundError as e:
-            if verbose or self._last_ssd_status is not False:
-                print(f"ERROR: SSD write test failed (directory not found or path error): {e}")
-                print(f"Please confirm '{self.ssd_mount_point}' is the actual SSD mount point.")
-            current_status = False
-        except IOError as e:
-            if verbose or self._last_ssd_status is not False:
-                print(f"ERROR: SSD write test failed (permission denied or read-only): {e}")
-                print(f"Please check write permissions for '{self.ssd_mount_point}'.")
-            current_status = False
-        except Exception as e:
-            if verbose or self._last_ssd_status is not False:
-                print(f"ERROR: An unexpected error occurred during SSD write test: {e}")
-            current_status = False
-
-        self._last_ssd_status = current_status
-        return current_status
-
-
-    def _scan_and_copy_from_usb_source(self):
-        """Scans and starts the copying process from the detected USB source device."""
-        if not self.active_usb_source_mount_point:
-            self.status_message = "No active USB source device selected or detected."
-            self.is_copying = False
-            self._update_ui()
-            return
-        
-        if not self.check_ssd_present():
-            self.status_message = "SSD not detected or not writable! Copy aborted."
-            self.is_copying = False
-            self._update_ui()
-            return
-
-        self.is_copying = True
-        self.status_message = f"Scanning USB device: {self.active_usb_source_mount_point}..."
-        self.total_files = 0
-        self.copied_files = 0
-        self.skipped_files = 0
-        self.error_files = 0
-        self.progress_percent = 0.0
-        self._update_ui()
-
-        files_to_copy = []
-        for root, _, files in os.walk(self.active_usb_source_mount_point):
-            for file in files:
-                file_path = os.path.join(root, file)
-                if not os.path.basename(file_path).startswith('.'):
-                    files_to_copy.append(file_path)
-        
-        self.total_files = len(files_to_copy)
-        if self.total_files == 0:
-            self.status_message = f"No files found on {self.active_usb_source_mount_point}."
-            self.is_copying = False
-            self._update_ui()
-            return
-
-        self.status_message = "Copying files..."
-        self._update_ui()
-
-        for i, src_file_path in enumerate(files_to_copy):
-            if not self.is_copying: # Check if copy was cancelled
-                self.status_message = "Copying cancelled."
-                break
-            
-            # Re-check SSD presence and writability before copying each file for robustness
-            if not self.check_ssd_present():
-                self.status_message = "SSD disconnected during copy! Copy aborted."
-                self.is_copying = False
-                self._update_ui()
-                break # Stop copying if SSD disconnects
-            
-            creation_date = self._get_file_creation_date(src_file_path)
-            dest_subdir = os.path.join(self.ssd_mount_point, creation_date)
-            
-            self.current_file = os.path.basename(src_file_path)
-            self._copy_file(src_file_path, dest_subdir)
-            
-            # Update progress percentage (processed files / total files)
-            self.progress_percent = ((self.copied_files + self.skipped_files + self.error_files) / self.total_files) * 100
-            self._update_ui()
-
-        # Status update after copying is finished
-        if self.is_copying: # Check if it completed normally (not cancelled)
-            self.status_message = f"Copy complete! Copied: {self.copied_files}, Skipped: {self.skipped_files}, Errors: {self.error_files}"
-            self.progress_percent = 100.0
-            # Add the successfully copied device to the processed set
-            if self.active_usb_source_mount_point:
-                self._processed_usb_devices.add(self.active_usb_source_mount_point)
-
-        self.is_copying = False # Set to not copying state
-        self.active_usb_source_mount_point = None # Clear active source after copy
-        self._update_ui()
-
-    def start_copy(self):
-        """Starts the USB device copying process in a new thread."""
-        if not self.is_copying:
-            # If active_usb_source_mount_point is not set yet (e.g., initial call)
-            if not self.active_usb_source_mount_point:
-                available_usb_sources = self.get_available_usb_source_devices()
-                unprocessed_usb_sources = [dev for dev in available_usb_sources if dev not in self._processed_usb_devices]
-                if not unprocessed_usb_sources:
-                    self.status_message = "No external USB devices found to copy from or all have been processed."
-                    self._update_ui()
-                    print("No external USB devices found to copy from or all have been processed.")
-                    return
-                self.active_usb_source_mount_point = unprocessed_usb_sources[0] # Select the first unprocessed device
-
-            print(f"Selected USB source device: {self.active_usb_source_mount_point}")
-
-            self.copy_thread = threading.Thread(target=self._scan_and_copy_from_usb_source, daemon=True)
-            self.copy_thread.start()
-            print("USB device copy process started.")
-        else:
-            print("Copy process already running.")
-
-    def stop_copy(self):
-        """Stops the copying process."""
-        if self.is_copying:
-            self.is_copying = False
-            self.status_message = "Copying cancelled by user."
-            print("USB device copy process requested to stop.")
-            self._update_ui()
-
-    def main_loop(self):
-        """Main loop for periodically checking USB devices and SSD and automatically starting copy."""
-        last_usb_devices_present = False
-        
-        # Perform an initial detection at the start of the loop and set initial state
-        current_usb_devices = self.get_available_usb_source_devices()
-        last_usb_devices_present = bool(current_usb_devices)
-        self.check_ssd_present(verbose=True) # Print SSD status verbosely on first check
-
-        while True:
-            current_usb_devices = self.get_available_usb_source_devices()
-            current_usb_devices_present = bool(current_usb_devices)
-            current_ssd_state = self.check_ssd_present(verbose=False) # Check without verbose DEBUG output in loop
-
-            # Update status message based on device states
-            if self.is_copying:
-                # If currently copying, the status message is handled by _scan_and_copy_from_usb_source
+                    fout.write(chunk)
+                    self._bump(bytes_done=len(chunk))
+                fout.flush()
+                os.fsync(fout.fileno())
+            written = tmp.stat().st_size
+            if written != size:
+                raise IOError(f"size mismatch after copy: {written} != {size}")
+            if self.config.verify_after_copy and self._hash_file(tmp) != hasher.hexdigest():
+                raise IOError("checksum mismatch after copy (bad media or cable?)")
+            try:
+                os.utime(tmp, ns=(os.stat(src).st_atime_ns, os.stat(src).st_mtime_ns))
+            except OSError:
                 pass
-            elif not current_ssd_state:
-                self.status_message = "Please insert SSD."
-            elif current_ssd_state and not current_usb_devices_present:
-                self.status_message = "Waiting for external USB device..."
-            elif current_ssd_state and current_usb_devices_present:
-                unprocessed_usb_devices = [dev for dev in current_usb_devices if dev not in self._processed_usb_devices]
-                if unprocessed_usb_devices:
-                    self.status_message = f"Ready to copy (new USB device(s) {unprocessed_usb_devices} and SSD present)."
-                else:
-                    self.status_message = f"USB device(s) {current_usb_devices} and SSD present (no copying needed)."
-            
-            # Detect and start copying logic
-            # Trigger if USB devices and SSD are present, and not currently copying,
-            # and there are unprocessed USB devices.
-            if current_usb_devices_present and current_ssd_state and not self.is_copying:
-                unprocessed_usb_devices_now = [dev for dev in current_usb_devices if dev not in self._processed_usb_devices]
+            os.replace(tmp, dest)
+            self._fsync_dir(dest.parent)
+        except BaseException:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            raise
 
-                if unprocessed_usb_devices_now:
-                    self.active_usb_source_mount_point = unprocessed_usb_devices_now[0] # Select the first unprocessed device
-                    print(f"Detected new/unprocessed external USB device {self.active_usb_source_mount_point} and SSD! Starting copy process...")
-                    self.start_copy() # start_copy will use active_usb_source_mount_point
-            
-            # Detect USB device removal
-            # When USB devices are removed, clear them from the processed list so they can be re-copied on re-insertion
-            if not current_usb_devices_present and last_usb_devices_present:
-                print("External USB device removed.")
-                self._processed_usb_devices.clear() # Clear all processed USB devices
-                self.active_usb_source_mount_point = None
-                self.total_files = 0
-                self.copied_files = 0
-                self.skipped_files = 0
-                self.error_files = 0
-                self.progress_percent = 0.0
-                self.current_file = ""
-            
-            last_usb_devices_present = current_usb_devices_present
-            
-            self._update_ui() # Periodically update UI
+    def _hash_file(self, path) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            while True:
+                if self._cancel.is_set():
+                    raise CopyCancelled()
+                chunk = f.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
 
-            time.sleep(5) # Check every 5 seconds
+    @staticmethod
+    def _fsync_dir(directory: Path) -> None:
+        try:
+            fd = os.open(directory, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
 
-if __name__ == '__main__':
-    def ui_update_callback(data):
-        """This is the UI update callback function for printing status to the console."""
-        print(f"\n--- UI Update ---")
-        print(f"   Is Copying: {data['is_copying']}")
-        print(f"   Current File: {data['current_file']}")
-        print(f"   Progress: {data['progress_percent']:.2f}%")
-        print(f"   Total Files: {data['total_files']}")
-        print(f"   Copied Files: {data['copied_files']}")
-        print(f"   Skipped Files: {data['skipped_files']}")
-        print(f"   Error Files: {data['error_files']}")
-        print(f"   Status: {data['status_message']}")
-        print(f"   SSD Present: {data['ssd_present']}")
-        print(f"   Active USB Source: {data['active_usb_source']}")
-        print(f"-----------------\n")
+    @staticmethod
+    def _cleanup_partials(dest_dir: Path) -> None:
+        try:
+            for p in dest_dir.glob(".*.part"):
+                log.warning("Removing stale partial file %s", p)
+                p.unlink()
+        except OSError:
+            pass
 
-    # Initialize SDCopyManager
-    # IMPORTANT: Ensure your SSD is actually mounted at this path on your Raspberry Pi!
-    manager = SDCopyManager(ssd_mount_point="/mnt/backup_drive") 
-    manager.set_event_callback(ui_update_callback)
+    # ------------------------------------------------------------- bookkeeping
+    def _bump(self, counter: Optional[str] = None, bytes_done: int = 0) -> None:
+        with self._lock:
+            if counter:
+                setattr(self._status, counter, getattr(self._status, counter) + 1)
+            if bytes_done:
+                self._status.bytes_done += bytes_done
 
-    # --- Mock Data Block (for testing purposes only, the program reads real devices during actual run) ---
-    print("\n--- Mock Data Setup (for testing purposes only) ---")
-    print("These mock folders and files are used to test program logic without physical devices.")
-    print("On an actual Raspberry Pi, please ensure your physical USB device and SSD are correctly mounted.")
-    
-    mock_usb_path = "./mock_usb_device_A" 
-    mock_usb_path_B = "./mock_usb_device_B"
+    def _record_error(self, src: str, message: str) -> None:
+        log.error("Failed: %s: %s", src, message)
+        with self._lock:
+            self._status.error_files += 1
+            self._status.errors.append(f"{os.path.basename(src)}: {message}")
+            if len(self._status.errors) > 200:
+                del self._status.errors[:-200]
+        self._log_event("error", src, None, message)
 
-    os.makedirs(os.path.join(mock_usb_path, "2023-01-01"), exist_ok=True)
-    os.makedirs(os.path.join(mock_usb_path, "2023-01-02"), exist_ok=True)
-    os.makedirs(os.path.join(mock_usb_path_B, "2024-03-15"), exist_ok=True)
-    
-    with open(os.path.join(mock_usb_path, "2023-01-01", "photo1.jpg"), "w") as f: f.write("content1_photo1")
-    with open(os.path.join(mock_usb_path, "2023-01-01", "photo2.jpg"), "w") as f: f.write("content2_photo2")
-    with open(os.path.join(mock_usb_path, "2023-01-02", "video1.mp4"), "w") as f: f.write("video_content_a")
-    
-    with open(os.path.join(mock_usb_path_B, "2024-03-15", "document.pdf"), "w") as f: f.write("pdf_content")
+    def _open_session_log(self, source: devmod.BlockDevice, started: datetime) -> None:
+        try:
+            log_dir = self.config.state_dir / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in source.display_name)[:40]
+            path = log_dir / f"{started:%Y%m%d-%H%M%S}_{safe}.jsonl"
+            self._session_log = open(path, "a", encoding="utf-8")
+            self._log_event("start", source.mountpoint, None, json.dumps({
+                "device": source.device, "device_id": source.device_id, "label": source.label}))
+        except OSError as e:
+            log.warning("Cannot open session log on backup drive: %s", e)
+            self._session_log = None
 
-    with open(os.path.join(mock_usb_path, "2023-01-01", "photo1.jpg"), "w") as f: f.write("content1_diff") 
-    
-    print(f"Mock USB device folders created: {mock_usb_path} and {mock_usb_path_B}")
-    print(f"The program will attempt to write to the actual SSD mount point: {manager.ssd_mount_point}")
-    print("-----------------------------------\n")
+    def _log_event(self, kind: str, src: str, dest: Optional[str], message: Optional[str] = None) -> None:
+        if not self._session_log:
+            return
+        try:
+            self._session_log.write(json.dumps({
+                "t": datetime.now().isoformat(timespec="seconds"), "event": kind,
+                "src": src, "dest": dest, "msg": message}, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
 
-    print("Starting SDCopyManager main loop.")
-    print("Please ensure your physical USB device is inserted into a location like '/media/pi/YOUR_USB_LABEL' and your physical SSD is mounted at '/mnt/backup_drive'.")
-    
-    threading.Thread(target=manager.main_loop, daemon=True).start()
+    def _close_session_log(self, result: str) -> None:
+        if not self._session_log:
+            return
+        st = self.get_status()
+        self._log_event("end", "", None, json.dumps({
+            "result": result, "copied": st["copied_files"], "skipped": st["skipped_files"],
+            "errors": st["error_files"], "bytes": st["bytes_done"]}))
+        try:
+            self._session_log.flush()
+            os.fsync(self._session_log.fileno())
+            self._session_log.close()
+        except OSError:
+            pass
+        self._session_log = None
 
+
+if __name__ == "__main__":
+    import sys
+    from config import load_config, setup_logging
+
+    cfg = load_config()
+    setup_logging(cfg)
+    manager = SDCopyManager(cfg)
+    manager.set_event_callback(lambda d: print(f"[{d['progress_percent']:5.1f}%] {d['status_message']}  {d['current_file']}", file=sys.stderr))
+    stop = threading.Event()
     try:
-        while True:
-            time.sleep(1) 
+        manager.main_loop(stop)
     except KeyboardInterrupt:
-        print("\nExiting SDCopyManager application.")
+        stop.set()
+        manager.stop_copy()

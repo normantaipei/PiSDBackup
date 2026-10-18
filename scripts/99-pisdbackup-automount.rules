@@ -1,0 +1,18 @@
+# Installed by scripts/install.sh with __BACKUP_UUID__, __UID__ and __GID__ substituted.
+# Mounts removable card partitions READ-ONLY under /media/pisdbackup/<dev>
+# so the backup daemon can see them even without a desktop session, and so
+# that nothing can ever modify the original card.  The backup SSD (matched
+# by UUID) and the Pi's own boot card are left alone.
+
+# FAT / exFAT / NTFS cards: give ownership to the service user.
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_FS_USAGE}=="filesystem", \
+  ENV{ID_FS_TYPE}=="vfat|exfat|ntfs", KERNEL!="mmcblk0*", ENV{ID_FS_UUID}!="__BACKUP_UUID__", ENV{ID_FS_UUID}!="", \
+  RUN+="/usr/bin/systemd-mount --no-block --collect --options=ro,noexec,nosuid,nodev,uid=__UID__,gid=__GID__ $devnode /media/pisdbackup/%k"
+
+# Other filesystems (ext4 etc.) do not accept uid/gid options.
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_FS_USAGE}=="filesystem", \
+  ENV{ID_FS_TYPE}!="vfat|exfat|ntfs", KERNEL!="mmcblk0*", ENV{ID_FS_UUID}!="__BACKUP_UUID__", ENV{ID_FS_UUID}!="", \
+  RUN+="/usr/bin/systemd-mount --no-block --collect --options=ro,noexec,nosuid,nodev $devnode /media/pisdbackup/%k"
+
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", KERNEL!="mmcblk0*", \
+  RUN+="/usr/bin/systemd-mount --umount /media/pisdbackup/%k"

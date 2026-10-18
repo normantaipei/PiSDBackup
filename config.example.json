@@ -1,0 +1,21 @@
+{
+  "backup_dir": "/mnt/backup_drive",
+  "media_extensions": [".jpg", ".jpeg", ".heic", ".arw", ".cr2", ".cr3", ".dng", ".nef", ".orf", ".raf", ".rw2", ".mp4", ".mov", ".mts"],
+  "source_mount_prefixes": ["/media", "/mnt", "/run/media"],
+  "verify_after_copy": true,
+  "poll_interval": 3.0,
+  "min_free_mib": 512,
+
+  "web_host": "0.0.0.0",
+  "web_port": 5000,
+  "web_auth": true,
+  "web_token": "",
+  "thumbnail_size": 320,
+  "preview_size": 1600,
+
+  "wifi_interface": "wlan0",
+  "debug_mode": false,
+  "fullscreen": true,
+  "log_level": "INFO",
+  "log_file": ""
+}
