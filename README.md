@@ -21,44 +21,55 @@ An automatic, verified SD-card backup box for photographers, built on a Raspberr
 | `wifi_manager.py` | Wi-Fi scan/connect via NetworkManager (`nmcli`), `wpa_cli` fallback |
 | `data_collector.py` | IP, SSID, drive usage, temperature, battery |
 | `display_manager.py` | Picks the SDL video driver (X11 / KMS-DRM / framebuffer) |
-| `scripts/install.sh` | One-time installer (packages, venv, systemd, udev automount) |
+| `scripts/install.sh` | Idempotent one-command installer (packages, SSD fstab, kiosk/system tweaks, systemd, udev) |
+| `scripts/bootstrap.sh` | `curl | sudo bash` entry point: clones the repo and runs the installer |
+| `scripts/pisdbackupctl.sh` | Installed as `pisdbackup`: status, logs, url, update, config |
 | `tests/` | pytest suite (copy engine, web API, UI rendering, device selection) |
 
-## Installation (Raspberry Pi OS Bookworm or newer)
+## Installation: one command on a fresh Pi
 
-### 1. Mount the backup SSD permanently
-
-Find the partition and its UUID, then add it to `/etc/fstab` so it mounts at boot:
-
-```bash
-lsblk -f
-sudo mkdir -p /mnt/backup_drive
-# exFAT example (recommended: readable on Mac and Windows):
-echo 'UUID=YOUR-UUID  /mnt/backup_drive  exfat  defaults,nofail,uid=1000,gid=1000,umask=022  0  0' | sudo tee -a /etc/fstab
-# ext4 example:
-# echo 'UUID=YOUR-UUID  /mnt/backup_drive  ext4  defaults,nofail  0  0' | sudo tee -a /etc/fstab
-sudo mount -a && findmnt /mnt/backup_drive
-```
-
-For ext4 make the mount writable by your user once: `sudo chown $USER /mnt/backup_drive`.
-
-### 2. Run the installer
+1. Flash **Raspberry Pi OS (Bookworm or newer, Lite or Desktop)** with Raspberry Pi Imager. In the Imager settings set your user, Wi-Fi and enable SSH.
+2. Plug in the touch screen and the backup SSD (exFAT recommended; NTFS/ext4 also work).
+3. Run:
 
 ```bash
-git clone https://github.com/normantaipei/PiSDBackup.git
-cd PiSDBackup
-./scripts/install.sh
-sudo systemctl start pisdbackup
+curl -fsSL https://raw.githubusercontent.com/normantaipei/PiSDBackup/main/scripts/bootstrap.sh | sudo bash
 ```
 
-The installer:
+Optional arguments go after `--`, for example:
 
-* installs system packages and a Python virtualenv in `.venv/`;
-* writes `/etc/pisdbackup/config.json` (edit it to change paths, port, extensions…);
-* installs `pisdbackup.service` running as your user (no root, no `sudo` needed at runtime except the optional debug Restart button);
-* installs a udev rule that mounts inserted cards **read-only** under `/media/pisdbackup/` so backups work without a desktop session. The backup SSD is excluded by UUID, which is why step 1 must be done first.
+```bash
+curl -fsSL https://raw.githubusercontent.com/normantaipei/PiSDBackup/main/scripts/bootstrap.sh \
+  | sudo bash -s -- --wifi-country TW --timezone Asia/Taipei --hostname pisdbackup
+```
 
-Logs: `journalctl -u pisdbackup -f`. Per-session copy logs (one JSON line per file, including every error) are written to `<backup_dir>/.pisdbackup/logs/`.
+The installer (`scripts/install.sh`) is idempotent, so you can re-run it any time to repair or re-apply settings. It does everything that used to be manual:
+
+| Step | What it does |
+| --- | --- |
+| packages | apt packages, Python virtualenv, `requirements.txt` |
+| drive | detects the backup SSD (asks if there are several), adds it to `/etc/fstab` by UUID with `nofail`, mounts it, checks the service user can write |
+| kiosk | boot to console (no desktop), screen blanking off, boot splash off, hidden console cursor, first-boot wizard removed |
+| system | hostname `pisdbackup` (`http://pisdbackup.local:5000`), SSH on, I2C on (battery gauge), Wi-Fi power-save off, journal capped at 50 MB, Bluetooth / ModemManager / printing / background apt timers off |
+| app | `/etc/pisdbackup/config.json`, user groups, systemd service running as **your user** (not root), udev rule that mounts inserted cards **read-only** under `/media/pisdbackup/` so backups work without a desktop, `pisdbackup` helper command |
+
+Useful flags: `--backup-dev /dev/sda1`, `--keep-desktop` (experimental), `--keep-bluetooth`, `--skip-drive`, `--skip-kiosk`, `--skip-system`, `--uninstall`, `--help`.
+
+After the reboot the screen shows the UI, the QR code and the access code. From a clone you can also run `sudo ./scripts/install.sh` directly.
+
+### Day-to-day
+
+```bash
+pisdbackup status     # service state + URLs
+pisdbackup logs       # follow the journal
+pisdbackup url        # browser link including the access code
+pisdbackup token      # just the access code
+pisdbackup update     # git pull + pip install + restart
+pisdbackup config     # edit /etc/pisdbackup/config.json and restart
+pisdbackup restart
+```
+
+Per-session copy logs (one JSON line per file, including every error) are written to `<backup_dir>/.pisdbackup/logs/`.
 
 ### Running by hand (development)
 

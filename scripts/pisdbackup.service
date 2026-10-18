@@ -1,20 +1,28 @@
-# Installed by scripts/install.sh with __USER__ and __APP_DIR__ substituted.
+# Installed by scripts/install.sh with __USER__, __APP_DIR__, __MOUNT_UNIT__ and __GROUPS__ substituted.
 [Unit]
 Description=PiSDBackup - touch UI, web browser and automatic SD card backup
-After=network-online.target local-fs.target
-Wants=network-online.target
+After=local-fs.target NetworkManager.service
+Wants=local-fs.target
+# Start after the backup SSD mount unit (fstab with nofail still creates it; missing drive is fine).
+After=__MOUNT_UNIT__
 
 [Service]
 Type=simple
 User=__USER__
 # Needed for KMS/DRM output and input devices when no desktop session is running.
-SupplementaryGroups=video render input
+SupplementaryGroups=__GROUPS__
 WorkingDirectory=__APP_DIR__
 Environment=PYTHONUNBUFFERED=1
 Environment=PISD_CONFIG=/etc/pisdbackup/config.json
 ExecStart=__APP_DIR__/.venv/bin/python __APP_DIR__/main.py
-Restart=on-failure
+Restart=always
 RestartSec=5
+# Give the copy thread time to finish the current file atomically.
+TimeoutStopSec=30
+KillSignal=SIGTERM
+# Hardening: /usr, /boot and /etc read-only for the app (it only writes to the SSD, /media and ~/.config).
+ProtectSystem=full
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
